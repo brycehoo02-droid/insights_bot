@@ -90,25 +90,21 @@ CM_TEMPLATE = """📝 <b>Store Visit Update</b>
 <b>Outlet:</b> [Store name]
 <b>Date:</b> [DD/MM/YY]
 
-1️⃣ <b>Sales</b>
-Units sold: [#]  |  vs target: [Above/On/Below]
-Top SKU: [Product]
+1️⃣ <b>Good News</b>
+[What went well today — sales wins, positive customer reactions, staff support, strong display, etc.]
 
-2️⃣ <b>Competitors</b>
+2️⃣ <b>Competitors' Insights</b>
 [Brand] — shelf: [More/Same/Less] | price: [Higher/Same/Lower] | promo: [Describe or None]
+[Add one line per competitor observed]
 
 3️⃣ <b>Display &amp; Stock</b>
 Stock: [Full/Low/Out]  |  Display: [Good/Issue — describe]
 
-4️⃣ <b>Staff &amp; Customers</b>
-Staff attitude: [Supportive/Neutral/Against us]
-Customer feedback: [What they said]
-
-5️⃣ <b>Follow up</b>
-[Action needed or None]
+4️⃣ <b>What to Follow Up</b>
+[Action needed and by when — or None]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-💡 <i>Takes ~2 mins to fill. More detail = better insights!</i>"""
+💡 <i>Takes ~2 mins to fill. Add any extra observations freely below!</i>"""
 
 CATEGORY_ICONS = {
     "sales":      ("📈", "Sales Performance"),
