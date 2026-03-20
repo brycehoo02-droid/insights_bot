@@ -62,7 +62,7 @@ async def call_claude(notes: str, reporter: str) -> dict:
                 "content-type": "application/json"
             },
             json={
-                "model": "claude-sonnet-4-20250514",
+                "model": "claude-3-5-sonnet-20241022",
                 "max_tokens": 2048,
                 "system": SYSTEM_PROMPT,
                 "messages": [{"role": "user", "content": user_msg}]
