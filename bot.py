@@ -51,37 +51,25 @@ SENTIMENT_ICONS = {"Positive": "🟢", "Mixed": "🟡", "Negative": "🔴"}
 PRIORITY_ICONS  = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}
 
 
-async def call_claude(notes: str, reporter: str) -> dict:
+async def call_claude(notes: str, reporter: str, model: str) -> dict:
     user_msg = f"Reporter: {reporter or 'Unknown'}\n\nStore visit notes:\n{notes}"
-    
-    payload = {
-        "model": "claude-3-haiku-20240307",
+    payload  = {
+        "model": model,
         "max_tokens": 2048,
         "system": SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": user_msg}]
     }
-    
-    # Log exactly what we're sending
-    logger.info(f"Sending to Anthropic — model: {payload['model']}, key prefix: {ANTHROPIC_KEY[:12]}...")
-    
+    logger.info(f"Calling model: {model} | key prefix: {ANTHROPIC_KEY[:12]}...")
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
             "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
+            headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01",
+                     "content-type": "application/json"},
             json=payload
         )
-
-    # Log the FULL response so we can see exactly what Anthropic says
-    logger.info(f"Anthropic status: {r.status_code}")
-    logger.info(f"Anthropic full response: {r.text[:1000]}")
-
+    logger.info(f"Anthropic status: {r.status_code} | response: {r.text[:600]}")
     if r.status_code != 200:
         raise ValueError(f"ANTHROPIC_ERROR_{r.status_code}: {r.text[:500]}")
-
     data  = r.json()
     raw   = "".join(b.get("text", "") for b in data.get("content", []))
     clean = re.sub(r"```[a-zA-Z]*", "", raw).replace("```", "").strip()
@@ -101,33 +89,28 @@ def escape_md(text: str) -> str:
 def format_response(d: dict, reporter: str, date_str: str) -> str:
     sent_icon = SENTIMENT_ICONS.get(d.get("sentiment", "Mixed"), "🟡")
     pri_icon  = PRIORITY_ICONS.get(d.get("priority", "Medium"), "🟡")
-
     lines = [
         "*📋 Field Insights Report*",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         f"👤 *Reporter:* {escape_md(reporter or '—')}",
         f"📅 *Date:* {escape_md(date_str)}",
-        f"📊 *Sentiment:* {sent_icon} {escape_md(d.get('sentiment', '—'))}   |   *Priority:* {pri_icon} {escape_md(d.get('priority', '—'))}",
+        f"📊 *Sentiment:* {sent_icon} {escape_md(d.get('sentiment','—'))}   |   *Priority:* {pri_icon} {escape_md(d.get('priority','—'))}",
     ]
     if d.get("units_sold") not in (None, "null", "", "None"):
         lines.append(f"🛒 *Units sold:* {escape_md(str(d['units_sold']))}")
-
-    lines += ["", "*📝 Summary*", f"_{escape_md(d.get('summary', '—'))}_"]
-
+    lines += ["", "*📝 Summary*", f"_{escape_md(d.get('summary','—'))}_"]
     for key, (icon, label) in CATEGORY_ICONS.items():
         items = d.get(key, [])
         if items:
             lines += ["", f"{icon} *{escape_md(label)}*"]
             for item in items:
                 lines.append(f"• {escape_md(item)}")
-
     actions = d.get("actions", [])
     if actions:
         lines += ["", "⚡ *Actions Required*"]
         for a in actions:
             urg = a.get("urgency", "Soon")
-            lines.append(f"{URGENCY_ICONS.get(urg, '🟡')} _{escape_md(urg)}_ — {escape_md(a.get('action', ''))}")
-
+            lines.append(f"{URGENCY_ICONS.get(urg,'🟡')} _{escape_md(urg)}_ — {escape_md(a.get('action',''))}")
     lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━")
     return "\n".join(lines)
 
@@ -146,63 +129,69 @@ def get_reporter_name(message) -> str:
     return "Unknown"
 
 
+async def test_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lists all models available to your API key — use /testapi to diagnose."""
+    await update.message.reply_text("🔍 Checking your API key and available models\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                "https://api.anthropic.com/v1/models",
+                headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01"}
+            )
+        logger.info(f"Models endpoint: {r.status_code} | {r.text[:500]}")
+        if r.status_code == 200:
+            models = [m["id"] for m in r.json().get("data", [])]
+            if models:
+                lines = ["✅ *API key is valid\\! Available models:*"] + [f"• `{escape_md(m)}`" for m in models]
+            else:
+                lines = ["⚠️ API key works but no models returned\\."]
+        else:
+            lines = [f"❌ *API error {r.status_code}:*", f"`{escape_md(r.text[:300])}`"]
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN_V2)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: `{escape_md(str(e)[:200])}`", parse_mode=ParseMode.MARKDOWN_V2)
+
+
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     notes   = message.text or message.caption or ""
-
     if not notes.strip():
         if getattr(message, "media_group_id", None):
             return
-        await message.reply_text(
-            "⚠️ No text found in this forwarded message\\.",
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
+        await message.reply_text("⚠️ No text found in this forwarded message\\.", parse_mode=ParseMode.MARKDOWN_V2)
         return
 
     reporter   = get_reporter_name(message)
     date_str   = datetime.now().strftime("%d %b %Y, %I:%M %p")
+    model      = os.environ.get("MODEL_NAME", "claude-3-haiku-20240307")
     processing = await message.reply_text("⏳ Extracting insights\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
     try:
-        data     = await call_claude(notes, reporter)
+        data     = await call_claude(notes, reporter, model)
         response = format_response(data, reporter, date_str)
         await processing.edit_text(response, parse_mode=ParseMode.MARKDOWN_V2)
     except ValueError as e:
-        err_str = str(e)
-        logger.error(f"ValueError: {err_str}")
-        # Show the actual Anthropic error in Telegram so you can see it
-        await processing.edit_text(
-            f"⚠️ API Error — check logs:\n`{escape_md(err_str[:300])}`",
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
+        logger.error(f"ValueError: {e}")
+        await processing.edit_text(f"⚠️ `{escape_md(str(e)[:300])}`", parse_mode=ParseMode.MARKDOWN_V2)
     except json.JSONDecodeError as e:
         logger.error(f"JSON error: {e}")
         await processing.edit_text("⚠️ Could not parse AI response\\. Please try again\\.", parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+        logger.error(f"Error: {e}")
         await processing.edit_text(f"⚠️ Error: `{escape_md(str(e)[:200])}`", parse_mode=ParseMode.MARKDOWN_V2)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 *Field Insights Bot is active\\!*\n\n"
-        "Simply *forward* any store visit update into this chat\\.\n"
-        "Works with text messages and photo messages with captions\\.",
-        parse_mode=ParseMode.MARKDOWN_V2
-    )
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "*📖 How to use*\n\nForward any store visit update into this group\\.\nThe bot extracts insights automatically\\.",
+        "👋 *Field Insights Bot is active\\!*\n\nForward any store visit update and I'll extract the key insights automatically\\.",
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help",  help_command))
+    app.add_handler(CommandHandler("start",   start))
+    app.add_handler(CommandHandler("testapi", test_api))
     app.add_handler(MessageHandler(
         filters.FORWARDED & (filters.TEXT | filters.PHOTO | filters.CAPTION),
         handle_forwarded
