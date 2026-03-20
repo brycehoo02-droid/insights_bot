@@ -84,55 +84,31 @@ Return ONLY a valid JSON object with this structure:
   "store_performance": [{"store": "store name", "sentiment": "Positive/Mixed/Negative", "units": "number or null", "highlight": "one key point"}]
 }"""
 
-CM_TEMPLATE = """📝 <b>Store Visit Update Template</b>
+CM_TEMPLATE = """📝 <b>Store Visit Update</b>
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-Copy and fill in this template for each store visit:
+<b>Outlet:</b> [Store name]
+<b>Date:</b> [DD/MM/YY]
 
-<b>STORE DETAILS</b>
-• Outlet: [Store name]
-• Date: [DD/MM/YYYY]
-• Time in / out: [HH:MM – HH:MM]
-• Staff engaged: [Names]
+1️⃣ <b>Sales</b>
+Units sold: [#]  |  vs target: [Above/On/Below]
+Top SKU: [Product]
 
-<b>1. SALES UPDATE</b>
-• Units sold today: [Number]
-• Best selling SKU: [Product name]
-• Slow moving SKU: [Product name]
-• Sales vs target: [Above/On/Below target]
+2️⃣ <b>Competitors</b>
+[Brand] — shelf: [More/Same/Less] | price: [Higher/Same/Lower] | promo: [Describe or None]
 
-<b>2. COMPETITOR ACTIVITY</b>
-• Brands observed: [Brand names]
-• Their promotions: [Describe or None]
-• Their shelf space vs ours: [More/Same/Less]
-• Their pricing vs ours: [Higher/Same/Lower]
-• Staff pushing competitors: [Yes/No — which brand]
+3️⃣ <b>Display &amp; Stock</b>
+Stock: [Full/Low/Out]  |  Display: [Good/Issue — describe]
 
-<b>3. CUSTOMER FEEDBACK</b>
-• Common questions asked: [List]
-• Objections heard: [Price/Features/Brand/Other]
-• Positive reactions: [What resonated]
+4️⃣ <b>Staff &amp; Customers</b>
+Staff attitude: [Supportive/Neutral/Against us]
+Customer feedback: [What they said]
 
-<b>4. STOCK & DISPLAY</b>
-• Stock level: [Full/Low/Out of stock]
-• Display condition: [Good/Needs attention]
-• POS materials: [In place/Missing/Damaged]
-• Secondary display: [Yes/No — location]
+5️⃣ <b>Follow up</b>
+[Action needed or None]
 
-<b>5. STAFF UPDATE</b>
-• Staff knowledge level: [Good/Needs training]
-• Staff attitude: [Supportive/Neutral/Pushing competitors]
-• Training needed on: [Topic or None]
-
-<b>6. BRAND EXECUTION</b>
-• Planogram compliance: [Yes/No]
-• Issues to flag: [Describe or None]
-
-<b>7. FOLLOW UP NEEDED</b>
-• Action items: [List]
-• By when: [Date]
-
-━━━━━━━━━━━━━━━━━━━━━━━━"""
+━━━━━━━━━━━━━━━━━━━━━━━━
+💡 <i>Takes ~2 mins to fill. More detail = better insights!</i>"""
 
 CATEGORY_ICONS = {
     "sales":      ("📈", "Sales Performance"),
