@@ -71,8 +71,9 @@ async def call_claude(notes: str, reporter: str) -> dict:
         data = r.json()
 
     logger.info(f"API status: {r.status_code}")
-    if "error" in data:
-        raise ValueError(f"API error: {data['error']}")
+    logger.info(f"Full API response: {json.dumps(data)[:500]}")
+    if r.status_code != 200:
+        raise ValueError(f"API error {r.status_code}: {json.dumps(data)}")
 
     raw = "".join(b.get("text", "") for b in data.get("content", []))
     logger.info(f"Raw response: {raw[:600]}")
