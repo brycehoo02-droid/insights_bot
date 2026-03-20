@@ -81,7 +81,7 @@ async def call_claude(notes: str, reporter: str, model: str) -> dict:
 
 
 def escape_md(text: str) -> str:
-    for ch in r"\_*[]()~`>#+-=|{}.!":
+    for ch in ['\\', '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
         text = text.replace(ch, f"\\{ch}")
     return text
 
