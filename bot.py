@@ -71,31 +71,22 @@ async def call_claude(notes: str, reporter: str) -> dict:
         data = r.json()
 
     logger.info(f"API status: {r.status_code}")
-
     if "error" in data:
         raise ValueError(f"API error: {data['error']}")
 
     raw = "".join(b.get("text", "") for b in data.get("content", []))
-    logger.info(f"Raw response (first 600 chars): {raw[:600]}")
+    logger.info(f"Raw response: {raw[:600]}")
 
-    # Strip any markdown fences
     clean = raw.strip()
     clean = re.sub(r"```[a-zA-Z]*", "", clean).replace("```", "").strip()
-
-    # Extract the JSON object robustly
     start = clean.find("{")
     end   = clean.rfind("}") + 1
     if start == -1 or end == 0:
-        logger.error(f"No JSON object found in response: {clean}")
         raise ValueError("No JSON found in response")
-
-    json_str = clean[start:end]
-    logger.info(f"Extracted JSON (first 300 chars): {json_str[:300]}")
-    return json.loads(json_str)
+    return json.loads(clean[start:end])
 
 
 def escape_md(text: str) -> str:
-    """Escape special characters for Telegram MarkdownV2."""
     for ch in r"\_*[]()~`>#+-=|{}.!":
         text = text.replace(ch, f"\\{ch}")
     return text
@@ -115,8 +106,7 @@ def format_response(d: dict, reporter: str, date_str: str) -> str:
     if d.get("units_sold") not in (None, "null", "", "None"):
         lines.append(f"🛒 *Units sold:* {escape_md(str(d['units_sold']))}")
 
-    summary = d.get("summary", "—")
-    lines += ["", "*📝 Summary*", f"_{escape_md(summary)}_"]
+    lines += ["", "*📝 Summary*", f"_{escape_md(d.get('summary', '—'))}_"]
 
     for key, (icon, label) in CATEGORY_ICONS.items():
         items = d.get(key, [])
@@ -152,9 +142,19 @@ def get_reporter_name(message) -> str:
 
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    notes   = message.text or message.caption or ""
+
+    # Telegram sends photo+text as a media group — the caption holds the text
+    notes = message.text or message.caption or ""
+
+    # If this is part of a media group (multiple photos) with no text, skip silently
+    # Only process the message that actually carries the caption/text
     if not notes.strip():
-        await message.reply_text("⚠️ No text found in this forwarded message\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        if getattr(message, "media_group_id", None):
+            return  # Other photos in the same group — ignore
+        await message.reply_text(
+            "⚠️ No text found in this forwarded message\\. Make sure the original message contains text or a caption\\.",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
         return
 
     reporter   = get_reporter_name(message)
@@ -166,35 +166,34 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = format_response(data, reporter, date_str)
         await processing.edit_text(response, parse_mode=ParseMode.MARKDOWN_V2)
     except json.JSONDecodeError as e:
-        logger.error(f"JSON parse error: {e}")
-        await processing.edit_text("⚠️ Could not parse the AI response\\. Please try forwarding again\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        logger.error(f"JSON error: {e}")
+        await processing.edit_text("⚠️ Could not parse AI response\\. Please try forwarding again\\.", parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+        logger.error(f"Error: {e}")
         await processing.edit_text(f"⚠️ Error: {escape_md(str(e)[:200])}", parse_mode=ParseMode.MARKDOWN_V2)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
+    await update.message.reply_text(
         "👋 *Field Insights Bot is active\\!*\n\n"
-        "Simply *forward* any store visit update into this chat and I will automatically extract the key insights\\.\n\n"
+        "Simply *forward* any store visit update into this chat\\.\n"
+        "Works with text messages and photo messages with captions\\.\n\n"
         "*What I extract:*\n"
         "📈 Sales • 👀 Competitors • 💬 Customer feedback\n"
         "📦 Stock & display • 🙋 Staff • 🎯 Promo effectiveness\n"
-        "⚡ Actions required \\(Urgent / Soon / Monitor\\)\n\n"
-        "No commands needed — just forward and I'll handle the rest\\!"
+        "⚡ Actions required \\(Urgent / Soon / Monitor\\)",
+        parse_mode=ParseMode.MARKDOWN_V2
     )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
-        "*📖 How to use the Insights Bot*\n\n"
-        "1\\. A Channel Manager sends their store visit update\n"
-        "2\\. *Forward that message* into this Telegram group\n"
-        "3\\. The bot automatically replies with structured insights\n\n"
-        "*That's it — no commands needed\\!*"
+    await update.message.reply_text(
+        "*📖 How to use*\n\n"
+        "Forward any store visit update into this group\\.\n"
+        "Works with plain text or photos with captions\\.\n\n"
+        "The bot auto\\-detects forwarded messages and extracts insights immediately\\.",
+        parse_mode=ParseMode.MARKDOWN_V2
     )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2)
 
 
 def main():
@@ -202,7 +201,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help",  help_command))
     app.add_handler(MessageHandler(
-        filters.FORWARDED & (filters.TEXT | filters.CAPTION | filters.PHOTO),
+        filters.FORWARDED & (filters.TEXT | filters.PHOTO | filters.CAPTION),
         handle_forwarded
     ))
     logger.info("Bot is running — listening for forwarded messages...")
