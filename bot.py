@@ -55,7 +55,7 @@ async def call_claude(notes: str, reporter: str) -> dict:
     user_msg = f"Reporter: {reporter or 'Unknown'}\n\nStore visit notes:\n{notes}"
     
     payload = {
-        "model": os.environ.get("MODEL_NAME", "claude-3-haiku-20240307"),
+        "model": os.environ.get("MODEL_NAME", "claude-3-5-haiku-20241022"),
         "max_tokens": 2048,
         "system": SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": user_msg}]
