@@ -55,8 +55,18 @@ async def call_claude(notes: str, reporter: str) -> dict:
                   "messages": [{"role": "user", "content": user_msg}]}
         )
         data = r.json()
-    raw   = "".join(b.get("text", "") for b in data.get("content", []))
-    clean = raw.replace("```json", "").replace("```", "").strip()
+    raw = "".join(b.get("text", "") for b in data.get("content", []))
+    logger.info(f"Claude raw response: {raw[:500]}")
+    # Strip markdown fences and whitespace
+    clean = raw.strip()
+    for fence in ["```json", "```JSON", "```"]:
+        clean = clean.replace(fence, "")
+    clean = clean.strip()
+    # Extract JSON object if wrapped in extra text
+    start = clean.find("{")
+    end   = clean.rfind("}") + 1
+    if start != -1 and end > start:
+        clean = clean[start:end]
     return json.loads(clean)
 
 
@@ -120,8 +130,10 @@ def get_original_sender_name(message) -> str:
 
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    notes   = message.text or message.caption or ""
+    # Handle text messages, photo captions, and document captions
+    notes = message.text or message.caption or ""
     if not notes.strip():
+        await message.reply_text("⚠️ No text found in this forwarded message. Please forward a message that contains text.")
         return
 
     original  = get_original_sender_name(message)
@@ -182,7 +194,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help",  help_command))
     # Trigger on any forwarded message that contains text
-    app.add_handler(MessageHandler(filters.FORWARDED & (filters.TEXT | filters.CAPTION), handle_forwarded))
+    app.add_handler(MessageHandler(filters.FORWARDED & (filters.TEXT | filters.CAPTION | filters.PHOTO), handle_forwarded))
     logger.info("Bot is running — listening for forwarded messages...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
