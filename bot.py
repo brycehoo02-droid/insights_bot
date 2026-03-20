@@ -53,6 +53,17 @@ PRIORITY_ICONS  = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}
 
 async def call_claude(notes: str, reporter: str) -> dict:
     user_msg = f"Reporter: {reporter or 'Unknown'}\n\nStore visit notes:\n{notes}"
+    
+    payload = {
+        "model": "claude-3-5-sonnet-20241022",
+        "max_tokens": 2048,
+        "system": SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": user_msg}]
+    }
+    
+    # Log exactly what we're sending
+    logger.info(f"Sending to Anthropic — model: {payload['model']}, key prefix: {ANTHROPIC_KEY[:12]}...")
+    
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
             "https://api.anthropic.com/v1/messages",
@@ -61,25 +72,19 @@ async def call_claude(notes: str, reporter: str) -> dict:
                 "anthropic-version": "2023-06-01",
                 "content-type": "application/json"
             },
-            json={
-                "model": "claude-3-5-sonnet-20241022",
-                "max_tokens": 2048,
-                "system": SYSTEM_PROMPT,
-                "messages": [{"role": "user", "content": user_msg}]
-            }
+            json=payload
         )
-        data = r.json()
 
-    logger.info(f"API status: {r.status_code}")
-    logger.info(f"Full API response: {json.dumps(data)[:500]}")
+    # Log the FULL response so we can see exactly what Anthropic says
+    logger.info(f"Anthropic status: {r.status_code}")
+    logger.info(f"Anthropic full response: {r.text[:1000]}")
+
     if r.status_code != 200:
-        raise ValueError(f"API error {r.status_code}: {json.dumps(data)}")
+        raise ValueError(f"ANTHROPIC_ERROR_{r.status_code}: {r.text[:500]}")
 
-    raw = "".join(b.get("text", "") for b in data.get("content", []))
-    logger.info(f"Raw response: {raw[:600]}")
-
-    clean = raw.strip()
-    clean = re.sub(r"```[a-zA-Z]*", "", clean).replace("```", "").strip()
+    data  = r.json()
+    raw   = "".join(b.get("text", "") for b in data.get("content", []))
+    clean = re.sub(r"```[a-zA-Z]*", "", raw).replace("```", "").strip()
     start = clean.find("{")
     end   = clean.rfind("}") + 1
     if start == -1 or end == 0:
@@ -143,17 +148,13 @@ def get_reporter_name(message) -> str:
 
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
+    notes   = message.text or message.caption or ""
 
-    # Telegram sends photo+text as a media group — the caption holds the text
-    notes = message.text or message.caption or ""
-
-    # If this is part of a media group (multiple photos) with no text, skip silently
-    # Only process the message that actually carries the caption/text
     if not notes.strip():
         if getattr(message, "media_group_id", None):
-            return  # Other photos in the same group — ignore
+            return
         await message.reply_text(
-            "⚠️ No text found in this forwarded message\\. Make sure the original message contains text or a caption\\.",
+            "⚠️ No text found in this forwarded message\\.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
         return
@@ -166,33 +167,34 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data     = await call_claude(notes, reporter)
         response = format_response(data, reporter, date_str)
         await processing.edit_text(response, parse_mode=ParseMode.MARKDOWN_V2)
+    except ValueError as e:
+        err_str = str(e)
+        logger.error(f"ValueError: {err_str}")
+        # Show the actual Anthropic error in Telegram so you can see it
+        await processing.edit_text(
+            f"⚠️ API Error — check logs:\n`{escape_md(err_str[:300])}`",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
     except json.JSONDecodeError as e:
         logger.error(f"JSON error: {e}")
-        await processing.edit_text("⚠️ Could not parse AI response\\. Please try forwarding again\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await processing.edit_text("⚠️ Could not parse AI response\\. Please try again\\.", parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
-        logger.error(f"Error: {e}")
-        await processing.edit_text(f"⚠️ Error: {escape_md(str(e)[:200])}", parse_mode=ParseMode.MARKDOWN_V2)
+        logger.error(f"Unexpected error: {e}")
+        await processing.edit_text(f"⚠️ Error: `{escape_md(str(e)[:200])}`", parse_mode=ParseMode.MARKDOWN_V2)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Field Insights Bot is active\\!*\n\n"
         "Simply *forward* any store visit update into this chat\\.\n"
-        "Works with text messages and photo messages with captions\\.\n\n"
-        "*What I extract:*\n"
-        "📈 Sales • 👀 Competitors • 💬 Customer feedback\n"
-        "📦 Stock & display • 🙋 Staff • 🎯 Promo effectiveness\n"
-        "⚡ Actions required \\(Urgent / Soon / Monitor\\)",
+        "Works with text messages and photo messages with captions\\.",
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "*📖 How to use*\n\n"
-        "Forward any store visit update into this group\\.\n"
-        "Works with plain text or photos with captions\\.\n\n"
-        "The bot auto\\-detects forwarded messages and extracts insights immediately\\.",
+        "*📖 How to use*\n\nForward any store visit update into this group\\.\nThe bot extracts insights automatically\\.",
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
