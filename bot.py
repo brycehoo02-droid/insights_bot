@@ -9,7 +9,7 @@ logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-ANTHROPIC_KEY  = os.environ["ANTHROPIC_API_KEY"]
+ANTHROPIC_KEY  = os.environ["ANTHROPIC_API_KEY"].strip()
 
 SYSTEM_PROMPT = """You are a retail field insights analyst. Extract structured insights from store visit notes.
 
