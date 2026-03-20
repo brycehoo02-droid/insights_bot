@@ -51,6 +51,11 @@ SENTIMENT_ICONS = {"Positive": "🟢", "Mixed": "🟡", "Negative": "🔴"}
 PRIORITY_ICONS  = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}
 
 
+def esc(text: str) -> str:
+    """Escape text for Telegram HTML mode."""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 async def call_claude(notes: str, reporter: str, model: str) -> dict:
     user_msg = f"Reporter: {reporter or 'Unknown'}\n\nStore visit notes:\n{notes}"
     payload  = {
@@ -80,37 +85,36 @@ async def call_claude(notes: str, reporter: str, model: str) -> dict:
     return json.loads(clean[start:end])
 
 
-def escape_md(text: str) -> str:
-    for ch in ['\\', '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
-        text = text.replace(ch, f"\\{ch}")
-    return text
-
-
 def format_response(d: dict, reporter: str, date_str: str) -> str:
     sent_icon = SENTIMENT_ICONS.get(d.get("sentiment", "Mixed"), "🟡")
-    pri_icon  = PRIORITY_ICONS.get(d.get("priority", "Medium"), "🟡")
+    pri_icon  = PRIORITY_ICONS.get(d.get("priority",  "Medium"), "🟡")
+
     lines = [
-        "*📋 Field Insights Report*",
+        "📋 <b>Field Insights Report</b>",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"👤 *Reporter:* {escape_md(reporter or '—')}",
-        f"📅 *Date:* {escape_md(date_str)}",
-        f"📊 *Sentiment:* {sent_icon} {escape_md(d.get('sentiment','—'))}   |   *Priority:* {pri_icon} {escape_md(d.get('priority','—'))}",
+        f"👤 <b>Reporter:</b> {esc(reporter or '—')}",
+        f"📅 <b>Date:</b> {esc(date_str)}",
+        f"📊 <b>Sentiment:</b> {sent_icon} {esc(d.get('sentiment','—'))}   |   <b>Priority:</b> {pri_icon} {esc(d.get('priority','—'))}",
     ]
     if d.get("units_sold") not in (None, "null", "", "None"):
-        lines.append(f"🛒 *Units sold:* {escape_md(str(d['units_sold']))}")
-    lines += ["", "*📝 Summary*", f"_{escape_md(d.get('summary','—'))}_"]
+        lines.append(f"🛒 <b>Units sold:</b> {esc(str(d['units_sold']))}")
+
+    lines += ["", "📝 <b>Summary</b>", f"<i>{esc(d.get('summary','—'))}</i>"]
+
     for key, (icon, label) in CATEGORY_ICONS.items():
         items = d.get(key, [])
         if items:
-            lines += ["", f"{icon} *{escape_md(label)}*"]
+            lines += ["", f"{icon} <b>{label}</b>"]
             for item in items:
-                lines.append(f"• {escape_md(item)}")
+                lines.append(f"• {esc(item)}")
+
     actions = d.get("actions", [])
     if actions:
-        lines += ["", "⚡ *Actions Required*"]
+        lines += ["", "⚡ <b>Actions Required</b>"]
         for a in actions:
             urg = a.get("urgency", "Soon")
-            lines.append(f"{URGENCY_ICONS.get(urg,'🟡')} _{escape_md(urg)}_ — {escape_md(a.get('action',''))}")
+            lines.append(f"{URGENCY_ICONS.get(urg,'🟡')} <i>{esc(urg)}</i> — {esc(a.get('action',''))}")
+
     lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━")
     return "\n".join(lines)
 
@@ -129,66 +133,68 @@ def get_reporter_name(message) -> str:
     return "Unknown"
 
 
-async def test_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lists all models available to your API key — use /testapi to diagnose."""
-    await update.message.reply_text("🔍 Checking your API key and available models\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.get(
-                "https://api.anthropic.com/v1/models",
-                headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01"}
-            )
-        logger.info(f"Models endpoint: {r.status_code} | {r.text[:500]}")
-        if r.status_code == 200:
-            models = [m["id"] for m in r.json().get("data", [])]
-            if models:
-                lines = ["✅ *API key is valid\\! Available models:*"] + [f"• `{escape_md(m)}`" for m in models]
-            else:
-                lines = ["⚠️ API key works but no models returned\\."]
-        else:
-            lines = [f"❌ *API error {r.status_code}:*", f"`{escape_md(r.text[:300])}`"]
-        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN_V2)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: `{escape_md(str(e)[:200])}`", parse_mode=ParseMode.MARKDOWN_V2)
-
-
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     notes   = message.text or message.caption or ""
     if not notes.strip():
         if getattr(message, "media_group_id", None):
             return
-        await message.reply_text("⚠️ No text found in this forwarded message\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await message.reply_text("⚠️ No text found in this forwarded message.")
         return
 
     reporter   = get_reporter_name(message)
     date_str   = datetime.now().strftime("%d %b %Y, %I:%M %p")
-    model      = os.environ.get("MODEL_NAME", "claude-3-haiku-20240307")
-    processing = await message.reply_text("⏳ Extracting insights\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
+    model      = os.environ.get("MODEL_NAME", "claude-haiku-4-5-20251001").strip()
+    processing = await message.reply_text("⏳ Extracting insights...")
 
     try:
         data     = await call_claude(notes, reporter, model)
         response = format_response(data, reporter, date_str)
-        await processing.edit_text(response, parse_mode=ParseMode.MARKDOWN_V2)
+        await processing.edit_text(response, parse_mode=ParseMode.HTML)
     except ValueError as e:
         logger.error(f"ValueError: {e}")
-        await processing.edit_text(f"⚠️ `{escape_md(str(e)[:300])}`", parse_mode=ParseMode.MARKDOWN_V2)
+        await processing.edit_text(f"⚠️ Error: {str(e)[:300]}")
     except json.JSONDecodeError as e:
         logger.error(f"JSON error: {e}")
-        await processing.edit_text("⚠️ Could not parse AI response\\. Please try again\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await processing.edit_text("⚠️ Could not parse AI response. Please try again.")
     except Exception as e:
         logger.error(f"Error: {e}")
-        await processing.edit_text(f"⚠️ Error: `{escape_md(str(e)[:200])}`", parse_mode=ParseMode.MARKDOWN_V2)
+        await processing.edit_text(f"⚠️ Error: {str(e)[:200]}")
+
+
+async def test_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔍 Checking API key and available models...")
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                "https://api.anthropic.com/v1/models",
+                headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01"}
+            )
+        if r.status_code == 200:
+            models = [m["id"] for m in r.json().get("data", [])]
+            msg = "✅ <b>API key is valid! Available models:</b>\n" + "\n".join(f"• <code>{m}</code>" for m in models)
+        else:
+            msg = f"❌ API error {r.status_code}:\n<code>{esc(r.text[:300])}</code>"
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 *Field Insights Bot is active\\!*\n\nForward any store visit update and I'll extract the key insights automatically\\.",
-        parse_mode=ParseMode.MARKDOWN_V2
+        "👋 <b>Field Insights Bot is active!</b>\n\n"
+        "Simply <b>forward</b> any store visit update into this chat.\n"
+        "Works with text messages and photo messages with captions.\n\n"
+        "<b>What I extract:</b>\n"
+        "📈 Sales • 👀 Competitors • 💬 Customer feedback\n"
+        "📦 Stock &amp; display • 🙋 Staff • 🎯 Promo effectiveness\n"
+        "⚡ Actions required (Urgent / Soon / Monitor)",
+        parse_mode=ParseMode.HTML
     )
 
 
 def main():
+    logger.info(f"Loaded API key prefix: {ANTHROPIC_KEY[:20]}")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start",   start))
     app.add_handler(CommandHandler("testapi", test_api))
