@@ -288,17 +288,18 @@ async def handle_cm_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message:
         return
 
-    # Only process messages from the correct topic
     if not is_correct_topic(message):
         return
 
     notes = message.text or message.caption or ""
-if not notes.strip():
-    if getattr(message, "media_group_id", None):
-        return  # Silently skip extra photos in same album
-    return
-if not is_store_update(notes):
-    return  # Ignore casual chat
+
+    if not notes.strip():
+        if getattr(message, "media_group_id", None):
+            return
+        return
+
+    if not is_store_update(notes):
+        return
 
     reporter     = message.from_user.full_name if message.from_user else "Unknown"
     store        = extract_store_name(notes)
@@ -318,7 +319,6 @@ if not is_store_update(notes):
             "timestamp": datetime.now().isoformat(), "data": data, "notes": notes
         })
 
-        # Send full report to management group
         await context.bot.send_message(
             chat_id=MANAGEMENT_CHAT_ID,
             text=response,
@@ -464,9 +464,9 @@ def main():
     handle_cm_message
 ))
     app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & ~filters.FORWARDED,
-        handle_cm_message
-    ))
+    (filters.TEXT | filters.PHOTO | filters.CAPTION) & ~filters.COMMAND & ~filters.FORWARDED,
+    handle_cm_message
+))
     logger.info("Bot running — monitoring SG STORE VISITS topic...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
