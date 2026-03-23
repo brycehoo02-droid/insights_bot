@@ -293,8 +293,12 @@ async def handle_cm_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     notes = message.text or message.caption or ""
-    if not is_store_update(notes):
-        return  # Ignore casual chat
+if not notes.strip():
+    if getattr(message, "media_group_id", None):
+        return  # Silently skip extra photos in same album
+    return
+if not is_store_update(notes):
+    return  # Ignore casual chat
 
     reporter     = message.from_user.full_name if message.from_user else "Unknown"
     store        = extract_store_name(notes)
@@ -456,9 +460,9 @@ def main():
     app.add_handler(CommandHandler("chatid",   get_chat_id))
     app.add_handler(CommandHandler("topicid",  topic_id_command))
     app.add_handler(MessageHandler(
-        filters.FORWARDED & (filters.TEXT | filters.PHOTO | filters.CAPTION),
-        handle_forwarded
-    ))
+    (filters.TEXT | filters.PHOTO | filters.CAPTION) & ~filters.COMMAND & ~filters.FORWARDED,
+    handle_cm_message
+))
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & ~filters.FORWARDED,
         handle_cm_message
