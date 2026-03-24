@@ -553,12 +553,12 @@ def main():
         time=datetime.strptime("13:00", "%H:%M").time().replace(tzinfo=ZoneInfo("UTC")),
         name="daily_digest"
     )
-    app.job_queue.run_weekly(
-        send_weekly_rollup,
-        time=datetime.strptime("02:00", "%H:%M").time().replace(tzinfo=ZoneInfo("UTC")),
-        day=5,  # 0=Monday, 5=Saturday
-        name="weekly_rollup"
-    )
+    app.job_queue.run_daily(
+    send_weekly_rollup,
+    time=datetime.strptime("02:00", "%H:%M").time().replace(tzinfo=ZoneInfo("UTC")),
+    days=(6,),  # 6=Saturday
+    name="weekly_rollup"
+)
 
     app.add_handler(CommandHandler("start",    start))
     app.add_handler(CommandHandler("testapi",  test_api))
