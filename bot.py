@@ -4,6 +4,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from telegram.constants import ParseMode
 import httpx
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -11,7 +12,8 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN     = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_KEY      = os.environ["ANTHROPIC_API_KEY"].strip()
 MANAGEMENT_CHAT_ID = int(os.environ["MANAGEMENT_CHAT_ID"])
-SG_TOPIC_ID        = int(os.environ.get("SG_TOPIC_ID", "0"))  # 0 = not set yet
+SG_TOPIC_ID        = int(os.environ.get("SG_TOPIC_ID", "0"))
+SGT                = ZoneInfo("Asia/Singapore")
 
 insights_store = []
 MIN_MESSAGE_LENGTH = 80
@@ -56,21 +58,28 @@ Use this exact structure:
   }
 }
 
-Scoring guide:
-- our_shelf_score: 1=tiny/hidden, 10=dominant/prime position
-- staff_advocacy_score: 1=staff ignoring/misdirecting, 10=actively recommending us
-- display_quality_score: 1=damaged/missing, 10=perfect/premium placement
-- overall_share_index: weighted average of above
-- Use 5 as neutral default if insufficient info
-- Only populate competitor_bench with brands actually mentioned
+Scoring: our_shelf_score 1=hidden 10=dominant, staff_advocacy_score 1=ignoring us 10=actively recommending,
+display_quality_score 1=damaged/missing 10=perfect placement. Use 5 as neutral default if insufficient info.
+Only populate competitor_bench with brands actually mentioned. Empty arrays [] are fine. Never truncate."""
 
-Rules:
-- Only include array items with real content from the notes
-- Empty arrays [] are fine
-- Keep insights concise, one sentence each
-- Always return valid JSON, never truncate"""
+DAILY_PROMPT = """You are a retail field insights analyst. Analyse today's store visit reports and produce a daily digest.
 
-WEEKLY_PROMPT = """You are a retail field insights analyst. Analyse these store visit reports from the past 7 days and produce a weekly rollup.
+Return ONLY a valid JSON object:
+{
+  "date": "today's date",
+  "daily_summary": "2-3 sentence overview of today",
+  "total_units_sold": "total number or null",
+  "overall_sentiment": "Positive/Mixed/Negative",
+  "stores_visited": ["store 1", "store 2"],
+  "top_wins": ["win 1", "win 2"],
+  "issues_flagged": ["issue 1", "issue 2"],
+  "competitor_activity": ["observation 1", "observation 2"],
+  "urgent_actions": [{"action": "what to do", "store": "which store", "urgency": "Urgent/Soon/Monitor"}],
+  "share_trend_today": "Gaining/Holding/Losing",
+  "avg_share_index": "average 1-10"
+}"""
+
+WEEKLY_PROMPT = """You are a retail field insights analyst. Analyse this week's store visit reports and produce a weekly rollup.
 
 Return ONLY a valid JSON object:
 {
@@ -116,7 +125,6 @@ CATEGORY_ICONS = {
     "staff":      ("🙋", "Staff Feedback"),
     "promo":      ("🎯", "Promo Effectiveness"),
 }
-
 URGENCY_ICONS   = {"Urgent": "🔴", "Soon": "🟡", "Monitor": "🟢"}
 SENTIMENT_ICONS = {"Positive": "🟢", "Mixed": "🟡", "Negative": "🔴"}
 PRIORITY_ICONS  = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}
@@ -129,16 +137,12 @@ def esc(text: str) -> str:
 
 
 def is_correct_topic(message) -> bool:
-    """Check if message is in the SG STORE VISITS topic."""
     if SG_TOPIC_ID == 0:
-        # Topic ID not set yet — process all messages (for setup purposes)
         return True
-    thread_id = getattr(message, "message_thread_id", None)
-    return thread_id == SG_TOPIC_ID
+    return getattr(message, "message_thread_id", None) == SG_TOPIC_ID
 
 
 def is_store_update(text: str) -> bool:
-    """Heuristic to detect store visit updates vs casual chat."""
     if len(text) < MIN_MESSAGE_LENGTH:
         return False
     keywords = [
@@ -146,10 +150,10 @@ def is_store_update(text: str) -> bool:
         "competitor", "bose", "jbl", "samsung", "follow up", "good news",
         "shelf", "promo", "customer", "staff", "harvey norman", "challenger",
         "courts", "takashimaya", "airport", "millenia", "clocked in", "sva",
-        "brand execution", "engagement", "buzz plan", "train", "insights"
+        "brand execution", "engagement", "buzz plan", "train", "insights",
+        "sprintcass", "bowers", "marshall", "sonos", "b&o", "sennheiser"
     ]
-    text_lower = text.lower()
-    return sum(1 for kw in keywords if kw in text_lower) >= 2
+    return sum(1 for kw in keywords if kw in text.lower()) >= 2
 
 
 async def call_claude(prompt: str, user_msg: str, model: str) -> dict:
@@ -179,56 +183,47 @@ def format_share_bar(score) -> str:
     return "█" * filled + "░" * (8 - filled) + f" {score}/10"
 
 
-def format_response(d: dict, reporter: str, store: str, date_str: str, source: str) -> str:
-    sent_icon = SENTIMENT_ICONS.get(d.get("sentiment", "Mixed"), "🟡")
-    pri_icon  = PRIORITY_ICONS.get(d.get("priority",  "Medium"), "🟡")
+def extract_store_name(notes: str) -> str:
+    for line in notes.splitlines():
+        low = line.lower()
+        if "outlet" in low or "store" in low:
+            parts = line.split(":", 1)
+            if len(parts) > 1 and len(parts[1].strip()) > 1:
+                return parts[1].strip()
+    return "Unknown Store"
+
+
+def format_daily(d: dict, count: int, date_str: str) -> str:
+    sent_icon  = SENTIMENT_ICONS.get(d.get("overall_sentiment", "Mixed"), "🟡")
+    trend_icon = TREND_ICONS.get(d.get("share_trend_today", "Holding"), "➡️")
     lines = [
-        "📋 <b>Field Insights Report</b>",
+        "📋 <b>Daily Field Insights Digest</b>",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"👤 <b>Reporter:</b> {esc(reporter or '—')}",
-        f"🏪 <b>Store:</b> {esc(store or '—')}",
         f"📅 <b>Date:</b> {esc(date_str)}",
-        f"💬 <b>Source:</b> {esc(source)}",
-        f"📊 <b>Sentiment:</b> {sent_icon} {esc(d.get('sentiment','—'))}   |   <b>Priority:</b> {pri_icon} {esc(d.get('priority','—'))}",
+        f"📊 <b>Reports received:</b> {count}",
+        f"📊 <b>Overall sentiment:</b> {sent_icon} {esc(d.get('overall_sentiment','—'))}",
     ]
-    if d.get("units_sold") not in (None, "null", "", "None"):
-        lines.append(f"🛒 <b>Units sold:</b> {esc(str(d['units_sold']))}")
-    lines += ["", "📝 <b>Summary</b>", f"<i>{esc(d.get('summary','—'))}</i>"]
-    for key, (icon, label) in CATEGORY_ICONS.items():
-        items = d.get(key, [])
-        if items:
-            lines += ["", f"{icon} <b>{label}</b>"]
-            for item in items:
-                lines.append(f"• {esc(item)}")
-    bench = d.get("competitor_bench", [])
-    if bench:
-        lines += ["", "⚔️ <b>Competitor Benchmarking</b>"]
-        for c in bench:
-            threat = c.get("threat_level", "Low")
-            lines.append(
-                f"{THREAT_COLORS.get(threat,'🟢')} <b>{esc(c.get('brand','?'))}</b> — "
-                f"Shelf: {esc(c.get('shelf_space','?'))} | "
-                f"Price: {esc(c.get('price_position','?'))} | "
-                f"Staff: {esc(c.get('staff_engagement','?'))} | "
-                f"Promo: {esc(c.get('promo_activity','None'))}"
-            )
-    msp = d.get("market_share_proxy", {})
-    if msp:
-        trend = msp.get("share_trend", "Holding")
-        lines += ["", "📊 <b>Market Share Proxy</b>"]
-        lines.append(f"{TREND_ICONS.get(trend,'➡️')} <b>Trend:</b> {esc(trend)}  |  <b>Pressure:</b> {esc(msp.get('competitor_pressure','—'))}")
-        lines.append(f"🏪 Shelf score:     <code>{format_share_bar(msp.get('our_shelf_score',5))}</code>")
-        lines.append(f"🙋 Staff advocacy:  <code>{format_share_bar(msp.get('staff_advocacy_score',5))}</code>")
-        lines.append(f"🎯 Display quality: <code>{format_share_bar(msp.get('display_quality_score',5))}</code>")
-        lines.append(f"⭐ Overall index:   <code>{format_share_bar(msp.get('overall_share_index',5))}</code>")
-        if msp.get("notes"):
-            lines.append(f"💡 <i>{esc(msp['notes'])}</i>")
-    actions = d.get("actions", [])
-    if actions:
+    if d.get("total_units_sold") not in (None, "null", "", "None"):
+        lines.append(f"🛒 <b>Total units sold:</b> {esc(str(d['total_units_sold']))}")
+    if d.get("stores_visited"):
+        lines.append(f"🏪 <b>Stores visited:</b> {esc(', '.join(d['stores_visited']))}")
+    lines += ["", "📝 <b>Today's Summary</b>", f"<i>{esc(d.get('daily_summary','—'))}</i>"]
+    if d.get("top_wins"):
+        lines += ["", "🏆 <b>Today's Wins</b>"]
+        for w in d["top_wins"]: lines.append(f"✅ {esc(w)}")
+    if d.get("issues_flagged"):
+        lines += ["", "⚠️ <b>Issues Flagged</b>"]
+        for i in d["issues_flagged"]: lines.append(f"• {esc(i)}")
+    if d.get("competitor_activity"):
+        lines += ["", "⚔️ <b>Competitor Activity</b>"]
+        for c in d["competitor_activity"]: lines.append(f"👀 {esc(c)}")
+    lines += ["", f"📈 <b>Share Trend Today:</b> {trend_icon} {esc(d.get('share_trend_today','—'))}  |  <b>Avg Index:</b> {esc(str(d.get('avg_share_index','—')))}/10"]
+    if d.get("urgent_actions"):
         lines += ["", "⚡ <b>Actions Required</b>"]
-        for a in actions:
+        for a in d["urgent_actions"]:
             urg = a.get("urgency", "Soon")
-            lines.append(f"{URGENCY_ICONS.get(urg,'🟡')} <i>{esc(urg)}</i> — {esc(a.get('action',''))}")
+            store = f" [{esc(a.get('store',''))}]" if a.get("store") else ""
+            lines.append(f"{URGENCY_ICONS.get(urg,'🟡')} <i>{esc(urg)}</i>{store} — {esc(a.get('action',''))}")
     lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━")
     return "\n".join(lines)
 
@@ -273,67 +268,129 @@ def format_weekly(d: dict, count: int, date_str: str) -> str:
     return "\n".join(lines)
 
 
-def extract_store_name(notes: str) -> str:
-    for line in notes.splitlines():
-        low = line.lower()
-        if "outlet" in low or "store" in low:
-            parts = line.split(":", 1)
-            if len(parts) > 1 and len(parts[1].strip()) > 1:
-                return parts[1].strip()
-    return "Unknown Store"
+async def send_daily_digest(context) -> None:
+    """Scheduled job — sends daily digest to management group at 9pm SGT."""
+    now_sgt  = datetime.now(SGT)
+    today    = now_sgt.strftime("%d %b %Y")
+    cutoff   = now_sgt.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_reports = [
+        i for i in insights_store
+        if datetime.fromisoformat(i["timestamp"]).astimezone(SGT) >= cutoff
+    ]
+    if not today_reports:
+        await context.bot.send_message(
+            chat_id=MANAGEMENT_CHAT_ID,
+            text=f"📋 <b>Daily Digest — {esc(today)}</b>\n\nNo store visit updates received today.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    model        = os.environ.get("MODEL_NAME", "claude-haiku-4-5-20251001").strip()
+    reports_text = "\n".join(
+        f"--- {r['store']} by {r['reporter']} ---\n{r['notes']}"
+        for r in today_reports
+    )
+    try:
+        data     = await call_claude(DAILY_PROMPT, reports_text, model)
+        response = format_daily(data, len(today_reports), today)
+        await context.bot.send_message(
+            chat_id=MANAGEMENT_CHAT_ID,
+            text=response,
+            parse_mode=ParseMode.HTML
+        )
+        logger.info(f"Daily digest sent — {len(today_reports)} reports")
+    except Exception as e:
+        logger.error(f"Daily digest error: {e}")
+        await context.bot.send_message(
+            chat_id=MANAGEMENT_CHAT_ID,
+            text=f"⚠️ Could not generate daily digest: {str(e)[:200]}",
+            parse_mode=ParseMode.HTML
+        )
+
+
+async def send_weekly_rollup(context) -> None:
+    """Scheduled job — sends weekly rollup to management group every Saturday 10am SGT."""
+    now_sgt  = datetime.now(SGT)
+    cutoff   = now_sgt - timedelta(days=7)
+    week_reports = [
+        i for i in insights_store
+        if datetime.fromisoformat(i["timestamp"]).astimezone(SGT) >= cutoff
+    ]
+    date_str = now_sgt.strftime("%d %b %Y, %I:%M %p")
+    if not week_reports:
+        await context.bot.send_message(
+            chat_id=MANAGEMENT_CHAT_ID,
+            text="📊 <b>Weekly Rollup</b>\n\nNo store visit updates received this week.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    model        = os.environ.get("MODEL_NAME", "claude-haiku-4-5-20251001").strip()
+    reports_text = "\n".join(
+        f"--- {r['store']} by {r['reporter']} on {r['date']} ---\n{r['notes']}"
+        for r in week_reports
+    )
+    try:
+        data     = await call_claude(WEEKLY_PROMPT, reports_text, model)
+        response = format_weekly(data, len(week_reports), date_str)
+        await context.bot.send_message(
+            chat_id=MANAGEMENT_CHAT_ID,
+            text=response,
+            parse_mode=ParseMode.HTML
+        )
+        logger.info(f"Weekly rollup sent — {len(week_reports)} reports")
+    except Exception as e:
+        logger.error(f"Weekly rollup error: {e}")
+        await context.bot.send_message(
+            chat_id=MANAGEMENT_CHAT_ID,
+            text=f"⚠️ Could not generate weekly rollup: {str(e)[:200]}",
+            parse_mode=ParseMode.HTML
+        )
 
 
 async def handle_cm_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
         return
-
     if not is_correct_topic(message):
         return
 
     notes = message.text or message.caption or ""
-
     if not notes.strip():
         if getattr(message, "media_group_id", None):
             return
         return
-
     if not is_store_update(notes):
         return
 
-    reporter     = message.from_user.full_name if message.from_user else "Unknown"
-    store        = extract_store_name(notes)
-    date_str     = datetime.now().strftime("%d %b %Y, %I:%M %p")
-    model        = os.environ.get("MODEL_NAME", "claude-haiku-4-5-20251001").strip()
-    source       = f"SG Store Visits — {message.chat.title or 'CM Group'}"
+    reporter = message.from_user.full_name if message.from_user else "Unknown"
+    store    = extract_store_name(notes)
+    date_str = datetime.now(SGT).strftime("%d %b %Y, %I:%M %p")
+    model    = os.environ.get("MODEL_NAME", "claude-haiku-4-5-20251001").strip()
 
-    ack = await message.reply_text("⏳ Analysing update...")
+    ack = await message.reply_text("⏳ Logging update...")
 
     try:
         user_msg = f"Reporter: {reporter}\nStore: {store}\n\nStore visit notes:\n{notes}"
         data     = await call_claude(SYSTEM_PROMPT, user_msg, model)
-        response = format_response(data, reporter, store, date_str, source)
 
         insights_store.append({
             "reporter": reporter, "store": store, "date": date_str,
-            "timestamp": datetime.now().isoformat(), "data": data, "notes": notes
+            "timestamp": datetime.now(SGT).isoformat(), "data": data, "notes": notes
         })
 
-        await context.bot.send_message(
-            chat_id=MANAGEMENT_CHAT_ID,
-            text=response,
+        await ack.edit_text(
+            f"✅ Update logged from <b>{esc(reporter)}</b> — <i>{esc(store)}</i>\n"
+            f"Daily digest will be sent at 9pm SGT.",
             parse_mode=ParseMode.HTML
         )
-
-        await ack.edit_text("✅ Update received & analysed — report sent to management.")
-
     except Exception as e:
         logger.error(f"Error: {e}")
-        await ack.edit_text("⚠️ Could not analyse this update. Please try again.")
+        await ack.edit_text("⚠️ Could not log this update. Please try again.")
 
 
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manual forwarding fallback in the management group."""
+    """Manual forwarding in management group — analyses immediately."""
     message = update.message
     notes   = message.text or message.caption or ""
     if not notes.strip():
@@ -343,74 +400,106 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reporter   = message.from_user.full_name if message.from_user else "Unknown"
     store      = extract_store_name(notes)
-    date_str   = datetime.now().strftime("%d %b %Y, %I:%M %p")
+    date_str   = datetime.now(SGT).strftime("%d %b %Y, %I:%M %p")
     model      = os.environ.get("MODEL_NAME", "claude-haiku-4-5-20251001").strip()
     processing = await message.reply_text("⏳ Extracting insights...")
 
     try:
         user_msg = f"Reporter: {reporter}\nStore: {store}\n\nStore visit notes:\n{notes}"
         data     = await call_claude(SYSTEM_PROMPT, user_msg, model)
-        response = format_response(data, reporter, store, date_str, "Manual forward")
+
+        # Also save to store for daily/weekly digest
         insights_store.append({
             "reporter": reporter, "store": store, "date": date_str,
-            "timestamp": datetime.now().isoformat(), "data": data, "notes": notes
+            "timestamp": datetime.now(SGT).isoformat(), "data": data, "notes": notes
         })
-        await processing.edit_text(response, parse_mode=ParseMode.HTML)
+
+        # Format and send full report for manual forwards
+        from telegram.constants import ParseMode as PM
+        sent_icon = SENTIMENT_ICONS.get(data.get("sentiment", "Mixed"), "🟡")
+        pri_icon  = PRIORITY_ICONS.get(data.get("priority",  "Medium"), "🟡")
+        lines = [
+            "📋 <b>Field Insights Report</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"👤 <b>Reporter:</b> {esc(reporter)}",
+            f"🏪 <b>Store:</b> {esc(store)}",
+            f"📅 <b>Date:</b> {esc(date_str)}",
+            f"📊 <b>Sentiment:</b> {sent_icon} {esc(data.get('sentiment','—'))}   |   <b>Priority:</b> {pri_icon} {esc(data.get('priority','—'))}",
+        ]
+        if data.get("units_sold") not in (None, "null", "", "None"):
+            lines.append(f"🛒 <b>Units sold:</b> {esc(str(data['units_sold']))}")
+        lines += ["", "📝 <b>Summary</b>", f"<i>{esc(data.get('summary','—'))}</i>"]
+        for key, (icon, label) in CATEGORY_ICONS.items():
+            items = data.get(key, [])
+            if items:
+                lines += ["", f"{icon} <b>{label}</b>"]
+                for item in items: lines.append(f"• {esc(item)}")
+        bench = data.get("competitor_bench", [])
+        if bench:
+            lines += ["", "⚔️ <b>Competitor Benchmarking</b>"]
+            for c in bench:
+                threat = c.get("threat_level", "Low")
+                lines.append(
+                    f"{THREAT_COLORS.get(threat,'🟢')} <b>{esc(c.get('brand','?'))}</b> — "
+                    f"Shelf: {esc(c.get('shelf_space','?'))} | "
+                    f"Price: {esc(c.get('price_position','?'))} | "
+                    f"Promo: {esc(c.get('promo_activity','None'))}"
+                )
+        msp = data.get("market_share_proxy", {})
+        if msp:
+            trend = msp.get("share_trend", "Holding")
+            lines += ["", "📊 <b>Market Share Proxy</b>"]
+            lines.append(f"{TREND_ICONS.get(trend,'➡️')} <b>Trend:</b> {esc(trend)}")
+            lines.append(f"⭐ Overall index: <code>{format_share_bar(msp.get('overall_share_index',5))}</code>")
+        actions = data.get("actions", [])
+        if actions:
+            lines += ["", "⚡ <b>Actions Required</b>"]
+            for a in actions:
+                urg = a.get("urgency","Soon")
+                lines.append(f"{URGENCY_ICONS.get(urg,'🟡')} <i>{esc(urg)}</i> — {esc(a.get('action',''))}")
+        lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━")
+        await processing.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.error(f"Error: {e}")
         await processing.edit_text(f"⚠️ Error: {str(e)[:200]}")
 
 
-async def weekly_rollup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cutoff = datetime.now() - timedelta(days=7)
-    recent = [i for i in insights_store if datetime.fromisoformat(i["timestamp"]) >= cutoff]
-    if not recent:
-        await update.message.reply_text("📭 <b>No reports this week yet.</b>", parse_mode=ParseMode.HTML)
-        return
-    processing = await update.message.reply_text(f"⏳ Generating weekly rollup from {len(recent)} report(s)...")
-    model    = os.environ.get("MODEL_NAME", "claude-haiku-4-5-20251001").strip()
-    date_str = datetime.now().strftime("%d %b %Y, %I:%M %p")
-    reports_text = "\n".join(
-        f"--- Report {i+1}: {r['store']} by {r['reporter']} on {r['date']} ---\n{r['notes']}"
-        for i, r in enumerate(recent)
-    )
-    try:
-        data     = await call_claude(WEEKLY_PROMPT, reports_text, model)
-        response = format_weekly(data, len(recent), date_str)
-        await processing.edit_text(response, parse_mode=ParseMode.HTML)
-    except Exception as e:
-        logger.error(f"Weekly error: {e}")
-        await processing.edit_text(f"⚠️ Error: {str(e)[:200]}")
+async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """On-demand daily digest."""
+    await update.message.reply_text("⏳ Generating today's digest...")
+    await send_daily_digest(context)
+
+
+async def cmd_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """On-demand weekly rollup."""
+    await update.message.reply_text("⏳ Generating weekly rollup...")
+    await send_weekly_rollup(context)
 
 
 async def topic_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send this command inside a topic to get its thread ID."""
-    message    = update.message
-    thread_id  = getattr(message, "message_thread_id", None)
-    chat_id    = message.chat_id
-    chat_title = message.chat.title or "this group"
+    message   = update.message
+    thread_id = getattr(message, "message_thread_id", None)
+    chat_id   = message.chat_id
     if thread_id:
         await message.reply_text(
             f"📌 <b>Topic ID found!</b>\n\n"
-            f"<b>Group:</b> {esc(chat_title)}\n"
             f"<b>Chat ID:</b> <code>{chat_id}</code>\n"
             f"<b>Topic thread ID:</b> <code>{thread_id}</code>\n\n"
-            f"Add this to Render as:\n"
-            f"<code>SG_TOPIC_ID = {thread_id}</code>",
+            f"Add to Render as: <code>SG_TOPIC_ID = {thread_id}</code>",
             parse_mode=ParseMode.HTML
         )
     else:
         await message.reply_text(
-            f"ℹ️ This message is not inside a topic.\n"
-            f"<b>Chat ID:</b> <code>{chat_id}</code>\n\n"
-            f"Send /topicid from <b>inside</b> the SG STORE VISITS topic to get its ID.",
+            f"ℹ️ Not inside a topic.\n<b>Chat ID:</b> <code>{chat_id}</code>",
             parse_mode=ParseMode.HTML
         )
 
 
 async def get_chat_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cid = update.message.chat_id
-    await update.message.reply_text(f"<b>Chat ID:</b> <code>{cid}</code>", parse_mode=ParseMode.HTML)
+    await update.message.reply_text(
+        f"<b>Chat ID:</b> <code>{update.message.chat_id}</code>",
+        parse_mode=ParseMode.HTML
+    )
 
 
 async def template_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -434,15 +523,18 @@ async def test_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    topic_status = f"Monitoring topic ID: <code>{SG_TOPIC_ID}</code>" if SG_TOPIC_ID else "⚠️ SG_TOPIC_ID not set — send /topicid inside the SG STORE VISITS topic"
+    topic_status = f"Monitoring topic ID: <code>{SG_TOPIC_ID}</code>" if SG_TOPIC_ID else "⚠️ SG_TOPIC_ID not set"
     await update.message.reply_text(
         "👋 <b>Field Insights Bot is active!</b>\n\n"
-        f"📌 {topic_status}\n\n"
+        f"📌 {topic_status}\n"
+        "⏰ <b>Daily digest:</b> 9pm SGT\n"
+        "📅 <b>Weekly rollup:</b> Saturday 10am SGT\n\n"
         "<b>Commands:</b>\n"
-        "• /topicid — get the ID of the current topic\n"
-        "• /chatid — get this group's chat ID\n"
+        "• /daily — generate today's digest now\n"
+        "• /weekly — generate this week's rollup now\n"
         "• /template — get the CM update template\n"
-        "• /weekly — generate this week's rollup\n"
+        "• /topicid — get the current topic ID\n"
+        "• /chatid — get this group's chat ID\n"
         "• /testapi — check API connection",
         parse_mode=ParseMode.HTML
     )
@@ -452,22 +544,39 @@ def main():
     logger.info(f"API key prefix: {ANTHROPIC_KEY[:20]}")
     logger.info(f"Management chat ID: {MANAGEMENT_CHAT_ID}")
     logger.info(f"SG Topic ID: {SG_TOPIC_ID}")
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # SGT = UTC+8, so 9pm SGT = 13:00 UTC, Saturday 10am SGT = Saturday 02:00 UTC
+    app.job_queue.run_daily(
+        send_daily_digest,
+        time=datetime.strptime("13:00", "%H:%M").time().replace(tzinfo=ZoneInfo("UTC")),
+        name="daily_digest"
+    )
+    app.job_queue.run_weekly(
+        send_weekly_rollup,
+        time=datetime.strptime("02:00", "%H:%M").time().replace(tzinfo=ZoneInfo("UTC")),
+        day=5,  # 0=Monday, 5=Saturday
+        name="weekly_rollup"
+    )
+
     app.add_handler(CommandHandler("start",    start))
     app.add_handler(CommandHandler("testapi",  test_api))
-    app.add_handler(CommandHandler("weekly",   weekly_rollup))
+    app.add_handler(CommandHandler("daily",    cmd_daily))
+    app.add_handler(CommandHandler("weekly",   cmd_weekly))
     app.add_handler(CommandHandler("template", template_command))
     app.add_handler(CommandHandler("chatid",   get_chat_id))
     app.add_handler(CommandHandler("topicid",  topic_id_command))
     app.add_handler(MessageHandler(
-    (filters.TEXT | filters.PHOTO | filters.CAPTION) & ~filters.COMMAND & ~filters.FORWARDED,
-    handle_cm_message
-))
+        filters.FORWARDED & (filters.TEXT | filters.PHOTO | filters.CAPTION),
+        handle_forwarded
+    ))
     app.add_handler(MessageHandler(
-    (filters.TEXT | filters.PHOTO | filters.CAPTION) & ~filters.COMMAND & ~filters.FORWARDED,
-    handle_cm_message
-))
-    logger.info("Bot running — monitoring SG STORE VISITS topic...")
+        (filters.TEXT | filters.PHOTO | filters.CAPTION) & ~filters.COMMAND & ~filters.FORWARDED,
+        handle_cm_message
+    ))
+
+    logger.info("Bot running — daily digest 9pm SGT, weekly rollup Saturday 10am SGT")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
