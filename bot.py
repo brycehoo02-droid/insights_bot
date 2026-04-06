@@ -295,12 +295,12 @@ def is_store_update(text: str) -> bool:
 
 async def call_claude(prompt: str, user_msg: str, model: str) -> dict:
     logger.info(f"Calling model: {model}")
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=90) as client:
         r = await client.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
-            json={"model": model, "max_tokens": 2048, "system": prompt,
+            json={"model": model, "max_tokens": 4096, "system": prompt,
                   "messages": [{"role": "user", "content": user_msg}]}
         )
     logger.info(f"Anthropic status: {r.status_code}")
@@ -311,7 +311,15 @@ async def call_claude(prompt: str, user_msg: str, model: str) -> dict:
     start, end = clean.find("{"), clean.rfind("}") + 1
     if start == -1 or end == 0:
         raise ValueError("No JSON in response")
-    return json.loads(clean[start:end])
+    json_str = clean[start:end]
+    # Remove stray control characters that break JSON
+    json_str = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ', json_str)
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        # Fix trailing commas as a last resort
+        json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
+        return json.loads(json_str)
 
 
 def format_retailer_block(r: dict, is_weekly: bool = False) -> list:
