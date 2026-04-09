@@ -453,9 +453,49 @@ async def send_daily_digest(context) -> None:
         for r in today_reports
     )
     try:
-        data     = await call_claude(DAILY_PROMPT, reports_text, model)
-        response = format_daily(data, len(today_reports), today)
-        await context.bot.send_message(chat_id=MANAGEMENT_CHAT_ID, text=response, parse_mode=ParseMode.HTML)
+        data = await call_claude(DAILY_PROMPT, reports_text, model)
+
+        # ── Message 1: Header + overall summary ───────────────────────────
+        sent_icon  = SENTIMENT_ICONS.get(data.get("overall_sentiment","Mixed"),"🟡")
+        trend_icon = TREND_ICONS.get(data.get("overall_share_trend","Holding"),"➡️")
+        header = [
+            "📋 <b>Daily Field Insights Digest</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"📅 <b>Date:</b> {esc(today)}",
+            f"📊 <b>Reports:</b> {len(today_reports)}  |  {sent_icon} {esc(data.get('overall_sentiment','—'))}  |  {trend_icon} {esc(data.get('overall_share_trend','—'))}",
+        ]
+        if data.get("total_units_sold") not in (None,"null","","None"):
+            header.append(f"🛒 <b>Total units sold:</b> {esc(str(data['total_units_sold']))}")
+        header += ["", f"📝 <i>{esc(data.get('daily_summary','—'))}</i>"]
+        await context.bot.send_message(
+            chat_id=MANAGEMENT_CHAT_ID,
+            text="\n".join(header),
+            parse_mode=ParseMode.HTML
+        )
+
+        # ── Message per retailer ───────────────────────────────────────────
+        for r in data.get("by_retailer", []):
+            lines = ["━━━━━━━━━━━━━━━━━━━━━━━━"] + format_retailer_block(r, is_weekly=False)
+            await context.bot.send_message(
+                chat_id=MANAGEMENT_CHAT_ID,
+                text="\n".join(lines),
+                parse_mode=ParseMode.HTML
+            )
+
+        # ── Final message: urgent actions ──────────────────────────────────
+        urgent = data.get("top_urgent_actions", [])
+        if urgent:
+            lines = ["━━━━━━━━━━━━━━━━━━━━━━━━", "⚡ <b>Priority Actions Today</b>"]
+            for a in urgent:
+                urg      = a.get("urgency","Soon")
+                retailer = f" [{esc(a.get('retailer',''))}]" if a.get("retailer") else ""
+                lines.append(f"{URGENCY_ICONS.get(urg,'🟡')} <i>{esc(urg)}</i>{retailer} — {esc(a.get('action',''))}")
+            await context.bot.send_message(
+                chat_id=MANAGEMENT_CHAT_ID,
+                text="\n".join(lines),
+                parse_mode=ParseMode.HTML
+            )
+
         logger.info(f"Daily digest sent — {len(today_reports)} reports")
     except Exception as e:
         logger.error(f"Daily digest error: {e}")
@@ -487,9 +527,62 @@ async def send_weekly_rollup(context) -> None:
         for r in week_reports
     )
     try:
-        data     = await call_claude(WEEKLY_PROMPT, reports_text, model)
-        response = format_weekly(data, len(week_reports), date_str)
-        await context.bot.send_message(chat_id=MANAGEMENT_CHAT_ID, text=response, parse_mode=ParseMode.HTML)
+        data = await call_claude(WEEKLY_PROMPT, reports_text, model)
+
+        # ── Message 1: Header + overall summary ───────────────────────────
+        sent_icon  = SENTIMENT_ICONS.get(data.get("overall_sentiment","Mixed"),"🟡")
+        trend_icon = TREND_ICONS.get(data.get("overall_share_trend","Holding"),"➡️")
+        header = [
+            "📊 <b>Weekly Field Insights Rollup</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"📅 <b>Week ending:</b> {esc(date_str)}",
+            f"📋 <b>Reports analysed:</b> {len(week_reports)}  |  {sent_icon} {esc(data.get('overall_sentiment','—'))}  |  {trend_icon} {esc(data.get('overall_share_trend','—'))}",
+            f"⭐ <b>Avg share index:</b> {esc(str(data.get('avg_share_index','—')))}/10",
+        ]
+        if data.get("total_units_sold") not in (None,"null","","None"):
+            header.append(f"🛒 <b>Total units sold:</b> {esc(str(data['total_units_sold']))}")
+        header += ["", f"📝 <i>{esc(data.get('week_summary','—'))}</i>"]
+        await context.bot.send_message(
+            chat_id=MANAGEMENT_CHAT_ID,
+            text="\n".join(header),
+            parse_mode=ParseMode.HTML
+        )
+
+        # ── Message per retailer ───────────────────────────────────────────
+        for r in data.get("by_retailer", []):
+            lines = ["━━━━━━━━━━━━━━━━━━━━━━━━"] + format_retailer_block(r, is_weekly=True)
+            await context.bot.send_message(
+                chat_id=MANAGEMENT_CHAT_ID,
+                text="\n".join(lines),
+                parse_mode=ParseMode.HTML
+            )
+
+        # ── Cross-retailer themes ──────────────────────────────────────────
+        themes = data.get("cross_retailer_themes", [])
+        if themes:
+            lines = ["━━━━━━━━━━━━━━━━━━━━━━━━", "🔍 <b>Cross-Retailer Themes</b>"]
+            for t in themes:
+                lines.append(f"• {esc(t)}")
+            await context.bot.send_message(
+                chat_id=MANAGEMENT_CHAT_ID,
+                text="\n".join(lines),
+                parse_mode=ParseMode.HTML
+            )
+
+        # ── Priority actions ───────────────────────────────────────────────
+        urgent = data.get("top_urgent_actions", [])
+        if urgent:
+            lines = ["━━━━━━━━━━━━━━━━━━━━━━━━", "⚡ <b>Priority Actions This Week</b>"]
+            for a in urgent:
+                urg      = a.get("urgency","Soon")
+                retailer = f" [{esc(a.get('retailer',''))}]" if a.get("retailer") else ""
+                lines.append(f"{URGENCY_ICONS.get(urg,'🟡')} <i>{esc(urg)}</i>{retailer} — {esc(a.get('action',''))}")
+            await context.bot.send_message(
+                chat_id=MANAGEMENT_CHAT_ID,
+                text="\n".join(lines),
+                parse_mode=ParseMode.HTML
+            )
+
         logger.info(f"Weekly rollup sent — {len(week_reports)} reports")
     except Exception as e:
         logger.error(f"Weekly rollup error: {e}")
