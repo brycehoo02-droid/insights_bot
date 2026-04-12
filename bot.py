@@ -15,9 +15,29 @@ MANAGEMENT_CHAT_ID = int(os.environ["MANAGEMENT_CHAT_ID"])
 SG_TOPIC_ID        = int(os.environ.get("SG_TOPIC_ID", "0"))
 SGT                = ZoneInfo("Asia/Singapore")
 
-insights_store = []
+# ── Persistent store ───────────────────────────────────────────────────────────
+STORE_FILE = "/tmp/insights_store.json"
+
+def load_store():
+    try:
+        with open(STORE_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def save_store():
+    try:
+        with open(STORE_FILE, "w") as f:
+            json.dump(insights_store, f)
+    except Exception as e:
+        logger.error(f"Failed to save store: {e}")
+
+insights_store = load_store()
+logger.info(f"Loaded {len(insights_store)} reports from disk")
+
 MIN_MESSAGE_LENGTH = 80
 
+# ── Store name normaliser ──────────────────────────────────────────────────────
 RETAILER_MAP = {
     "cms": "Courts Megastore", "courts megastore": "Courts Megastore", "courts": "Courts",
     "hn": "Harvey Norman", "harvey norman": "Harvey Norman",
@@ -66,6 +86,7 @@ def extract_store_name(notes: str) -> str:
                 return normalise_store(parts[1].strip())
     return "Unknown Store"
 
+# ── Prompts ────────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are a retail field insights analyst. Extract structured insights from store visit notes.
 
 Return ONLY a valid JSON object. Start with { and end with }.
@@ -271,9 +292,9 @@ def format_retailer_block(r: dict, is_weekly: bool = False) -> list:
     wins_key   = "top_wins" if is_weekly else "wins"
     issues_key = "recurring_issues" if is_weekly else "issues"
     comp_key   = "competitor_threats" if is_weekly else "competitor_activity"
-    for win in r.get(wins_key, []):    lines.append(f"   ✅ {esc(win)}")
+    for win in r.get(wins_key, []):     lines.append(f"   ✅ {esc(win)}")
     for issue in r.get(issues_key, []): lines.append(f"   ⚠️ {esc(issue)}")
-    for comp in r.get(comp_key, []):   lines.append(f"   👀 {esc(comp)}")
+    for comp in r.get(comp_key, []):    lines.append(f"   👀 {esc(comp)}")
     actions_key = "priority_actions" if is_weekly else "actions"
     for a in r.get(actions_key, []):
         urg = a.get("urgency","Soon")
@@ -405,6 +426,7 @@ async def handle_cm_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "date": date_str, "timestamp": datetime.now(SGT).isoformat(),
             "data": data, "notes": notes
         })
+        save_store()
         await ack.edit_text(
             f"✅ Update logged — <b>{esc(store)}</b> ({esc(retailer)}) by {esc(reporter)}\n"
             f"<i>Daily digest at 9pm SGT</i>", parse_mode=ParseMode.HTML)
@@ -433,6 +455,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "date": date_str, "timestamp": datetime.now(SGT).isoformat(),
             "data": data, "notes": notes
         })
+        save_store()
         sent_icon = SENTIMENT_ICONS.get(data.get("sentiment","Mixed"),"🟡")
         pri_icon  = PRIORITY_ICONS.get(data.get("priority","Medium"),"🟡")
         lines = [
@@ -518,9 +541,11 @@ async def test_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     topic_status = f"Monitoring topic ID: <code>{SG_TOPIC_ID}</code>" if SG_TOPIC_ID else "⚠️ SG_TOPIC_ID not set"
+    report_count = len(insights_store)
     await update.message.reply_text(
         "👋 <b>Field Insights Bot is active!</b>\n\n"
         f"📌 {topic_status}\n"
+        f"💾 <b>Reports in memory:</b> {report_count}\n"
         "⏰ <b>Daily digest:</b> 9pm SGT\n"
         "📅 <b>Weekly rollup:</b> Saturday 10am SGT\n\n"
         "<b>Commands:</b>\n"
@@ -537,7 +562,11 @@ def main():
     logger.info(f"API key prefix: {ANTHROPIC_KEY[:20]}")
     logger.info(f"Management chat ID: {MANAGEMENT_CHAT_ID}")
     logger.info(f"SG Topic ID: {SG_TOPIC_ID}")
+    logger.info(f"Reports loaded from disk: {len(insights_store)}")
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # 9pm SGT = 13:00 UTC | Saturday 10am SGT = Saturday 02:00 UTC
     app.job_queue.run_daily(
         send_daily_digest,
         time=datetime.strptime("13:00", "%H:%M").time().replace(tzinfo=ZoneInfo("UTC")),
@@ -548,6 +577,7 @@ def main():
         time=datetime.strptime("02:00", "%H:%M").time().replace(tzinfo=ZoneInfo("UTC")),
         days=(6,), name="weekly_rollup"
     )
+
     app.add_handler(CommandHandler("start",    start))
     app.add_handler(CommandHandler("testapi",  test_api))
     app.add_handler(CommandHandler("daily",    cmd_daily))
@@ -560,6 +590,7 @@ def main():
     app.add_handler(MessageHandler(
         (filters.TEXT | filters.PHOTO | filters.CAPTION) & ~filters.COMMAND & ~filters.FORWARDED,
         handle_cm_message))
+
     logger.info("Bot running — daily digest 9pm SGT, weekly rollup Saturday 10am SGT")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
