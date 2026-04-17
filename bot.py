@@ -18,113 +18,161 @@ SG_TOPIC_ID        = int(os.environ.get("SG_TOPIC_ID", "0"))
 GOOGLE_SHEET_ID    = os.environ.get("GOOGLE_SHEET_ID", "")
 SGT                = ZoneInfo("Asia/Singapore")
 
-# ── Google Sheets setup ────────────────────────────────────────────────────────
+# ── Google Sheets ──────────────────────────────────────────────────────────────
 def get_sheet():
     try:
-        creds_json = os.environ.get("GOOGLE_CREDENTIALS", "")
-        creds_dict = json.loads(creds_json)
+        creds_dict = json.loads(os.environ.get("GOOGLE_CREDENTIALS", ""))
         scopes     = ["https://spreadsheets.google.com/feeds",
                       "https://www.googleapis.com/auth/drive"]
         creds      = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         client     = gspread.authorize(creds)
-        sheet      = client.open_by_key(GOOGLE_SHEET_ID)
-        return sheet
+        return client.open_by_key(GOOGLE_SHEET_ID)
     except Exception as e:
         logger.error(f"Google Sheets connection error: {e}")
         return None
 
+
 def ensure_sheet_headers(worksheet):
-    """Set up headers if the sheet is empty."""
     headers = worksheet.row_values(1)
     if not headers:
         worksheet.append_row([
             "Date", "Reporter", "Store", "Retailer",
-            "Sentiment", "Priority", "Units Sold",
-            "Summary", "Sales Insights", "Competitor Activity",
-            "Customer Feedback", "Stock & Display", "Staff Feedback",
-            "Promo Effectiveness", "Actions Required",
-            "Competitor Benchmarking", "Share Trend", "Share Index",
-            "Share Index Notes", "Raw Notes"
+            "Sentiment", "Priority", "Units Sold", "Summary",
+            "✅ Wins / Good News", "👀 Competitors",
+            "💬 Customers", "📦 Stock & Display",
+            "🙋 Staff", "⚡ Actions"
         ], value_input_option="RAW")
-        # Format header row
-        worksheet.format("A1:T1", {
+
+        worksheet.format("A1:N1", {
             "backgroundColor": {"red": 0.1, "green": 0.1, "blue": 0.18},
-            "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
-            "horizontalAlignment": "CENTER"
+            "textFormat": {
+                "bold": True, "fontSize": 11,
+                "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
+            },
+            "horizontalAlignment": "CENTER",
+            "verticalAlignment": "MIDDLE"
         })
+
+        col_widths = [160, 130, 160, 130, 100, 90, 90, 280, 250, 250, 250, 220, 200, 260]
+        requests = [
+            {"updateDimensionProperties": {
+                "range": {"sheetId": worksheet.id, "dimension": "COLUMNS",
+                          "startIndex": i, "endIndex": i+1},
+                "properties": {"pixelSize": w}, "fields": "pixelSize"
+            }} for i, w in enumerate(col_widths)
+        ]
+        worksheet.spreadsheet.batch_update({"requests": requests})
+
+        worksheet.spreadsheet.batch_update({"requests": [{
+            "updateSheetProperties": {
+                "properties": {"sheetId": worksheet.id,
+                               "gridProperties": {"frozenRowCount": 1}},
+                "fields": "gridProperties.frozenRowCount"
+            }
+        }]})
+
 
 def write_to_sheet(data: dict, reporter: str, store: str, retailer: str,
                    date_str: str, notes: str):
-    """Write a single store visit report as a new row in Google Sheets."""
     try:
         sheet_obj = get_sheet()
         if not sheet_obj:
             return
-
-        # Try to get or create the "Store Visits" worksheet
         try:
             ws = sheet_obj.worksheet("Store Visits")
         except gspread.WorksheetNotFound:
-            ws = sheet_obj.add_worksheet(title="Store Visits", rows=1000, cols=20)
+            ws = sheet_obj.add_worksheet(title="Store Visits", rows=2000, cols=14)
 
         ensure_sheet_headers(ws)
 
-        # Flatten insights into readable strings
         def join_list(key):
             items = data.get(key, [])
-            return " | ".join(items) if items else ""
+            return "\n".join(f"• {item}" for item in items) if items else ""
 
         def format_actions(actions):
             if not actions: return ""
-            return " | ".join(f"[{a.get('urgency','?')}] {a.get('action','')}" for a in actions)
+            icons = {"Urgent": "🔴 ", "Soon": "🟡 ", "Monitor": "🟢 "}
+            return "\n".join(
+                f"{icons.get(a.get('urgency','Soon'),'• ')}{a.get('action','')}"
+                for a in actions
+            )
 
-        def format_bench(bench):
+        def format_competitors(bench):
             if not bench: return ""
-            parts = []
+            threat_icon = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}
+            lines = []
             for c in bench:
-                parts.append(f"{c.get('brand','?')}: shelf={c.get('shelf_space','?')} price={c.get('price_position','?')} promo={c.get('promo_activity','None')} threat={c.get('threat_level','?')}")
-            return " | ".join(parts)
+                icon = threat_icon.get(c.get("threat_level","Low"), "•")
+                lines.append(
+                    f"{icon} {c.get('brand','?')}\n"
+                    f"   Shelf: {c.get('shelf_space','?')} | "
+                    f"Price: {c.get('price_position','?')} | "
+                    f"Promo: {c.get('promo_activity','None')}"
+                )
+            return "\n".join(lines)
 
-        msp = data.get("market_share_proxy", {})
+        comp_text  = join_list("competitor")
+        bench_text = format_competitors(data.get("competitor_bench", []))
+        competitors = "\n".join(filter(None, [comp_text, bench_text]))
 
         row = [
-            date_str,
-            reporter,
-            store,
-            retailer,
+            date_str, reporter, store, retailer,
             data.get("sentiment", ""),
             data.get("priority", ""),
             data.get("units_sold", "") or "",
             data.get("summary", ""),
             join_list("sales"),
-            join_list("competitor"),
+            competitors,
             join_list("customer"),
             join_list("stock"),
             join_list("staff"),
-            join_list("promo"),
             format_actions(data.get("actions", [])),
-            format_bench(data.get("competitor_bench", [])),
-            msp.get("share_trend", "") if msp else "",
-            str(msp.get("overall_share_index", "")) if msp else "",
-            msp.get("notes", "") if msp else "",
-            notes[:500]  # Truncate raw notes to 500 chars
         ]
 
         ws.append_row(row, value_input_option="RAW")
-
-        # Colour-code the sentiment cell (column E = col 5)
         last_row = len(ws.get_all_values())
-        sentiment = data.get("sentiment", "")
-        if sentiment == "Positive":
-            color = {"red": 0.85, "green": 0.95, "blue": 0.85}
-        elif sentiment == "Negative":
-            color = {"red": 0.98, "green": 0.85, "blue": 0.85}
-        else:
-            color = {"red": 1.0, "green": 0.97, "blue": 0.85}
 
-        ws.format(f"E{last_row}", {"backgroundColor": color})
-        logger.info(f"Written to Google Sheets: {store} by {reporter}")
+        row_bg = {"red": 0.97, "green": 0.97, "blue": 1.0} if last_row % 2 == 0 \
+                 else {"red": 1.0, "green": 1.0, "blue": 1.0}
+        ws.format(f"A{last_row}:N{last_row}", {
+            "backgroundColor": row_bg,
+            "verticalAlignment": "TOP",
+            "wrapStrategy": "WRAP",
+            "textFormat": {"fontSize": 10}
+        })
 
+        sentiment_colors = {
+            "Positive": {"red": 0.82, "green": 0.95, "blue": 0.82},
+            "Mixed":    {"red": 1.0,  "green": 0.95, "blue": 0.75},
+            "Negative": {"red": 0.98, "green": 0.82, "blue": 0.82},
+        }
+        ws.format(f"E{last_row}", {
+            "backgroundColor": sentiment_colors.get(data.get("sentiment",""), row_bg),
+            "horizontalAlignment": "CENTER",
+            "textFormat": {"bold": True, "fontSize": 10}
+        })
+
+        priority_colors = {
+            "High":   {"red": 0.98, "green": 0.82, "blue": 0.82},
+            "Medium": {"red": 1.0,  "green": 0.95, "blue": 0.75},
+            "Low":    {"red": 0.82, "green": 0.95, "blue": 0.82},
+        }
+        ws.format(f"F{last_row}", {
+            "backgroundColor": priority_colors.get(data.get("priority",""), row_bg),
+            "horizontalAlignment": "CENTER",
+            "textFormat": {"bold": True, "fontSize": 10}
+        })
+        ws.format(f"G{last_row}", {"horizontalAlignment": "CENTER"})
+
+        ws.spreadsheet.batch_update({"requests": [{
+            "updateDimensionProperties": {
+                "range": {"sheetId": ws.id, "dimension": "ROWS",
+                          "startIndex": last_row - 1, "endIndex": last_row},
+                "properties": {"pixelSize": 90}, "fields": "pixelSize"
+            }
+        }]})
+
+        logger.info(f"Written to Google Sheets row {last_row}: {store} by {reporter}")
     except Exception as e:
         logger.error(f"Failed to write to Google Sheets: {e}")
 
@@ -226,19 +274,10 @@ Return ONLY a valid JSON object. Start with { and end with }.
       "staff_engagement": "High/Medium/Low/None",
       "threat_level": "High/Medium/Low"
     }
-  ],
-  "market_share_proxy": {
-    "our_shelf_score": 5,
-    "competitor_pressure": "High/Medium/Low",
-    "staff_advocacy_score": 5,
-    "display_quality_score": 5,
-    "overall_share_index": 5,
-    "share_trend": "Gaining/Holding/Losing",
-    "notes": "brief explanation"
-  }
+  ]
 }
 
-All numeric scores must be integers 1-10. Use 5 as neutral default. Empty arrays [] are fine. Never truncate."""
+Empty arrays [] are fine. Never truncate."""
 
 DAILY_PROMPT = """You are a retail field insights analyst. Analyse today's store visit reports and produce a daily digest broken down by retailer.
 
@@ -598,11 +637,6 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"{THREAT_COLORS.get(threat,'🟢')} <b>{esc(c.get('brand','?'))}</b> — "
                     f"Shelf: {esc(c.get('shelf_space','?'))} | Price: {esc(c.get('price_position','?'))} | "
                     f"Promo: {esc(c.get('promo_activity','None'))}")
-        msp = data.get("market_share_proxy", {})
-        if msp:
-            trend = msp.get("share_trend","Holding")
-            lines += ["", "📊 <b>Market Share Proxy</b>"]
-            lines.append(f"{TREND_ICONS.get(trend,'➡️')} {esc(trend)}  |  Overall: <code>{format_share_bar(msp.get('overall_share_index',5))}</code>")
         actions = data.get("actions", [])
         if actions:
             lines += ["", "⚡ <b>Actions Required</b>"]
