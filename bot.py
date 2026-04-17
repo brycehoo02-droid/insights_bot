@@ -5,6 +5,8 @@ from telegram.constants import ParseMode
 import httpx
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+import gspread
+from google.oauth2.service_account import Credentials
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -13,9 +15,121 @@ TELEGRAM_TOKEN     = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_KEY      = os.environ["ANTHROPIC_API_KEY"].strip()
 MANAGEMENT_CHAT_ID = int(os.environ["MANAGEMENT_CHAT_ID"])
 SG_TOPIC_ID        = int(os.environ.get("SG_TOPIC_ID", "0"))
+GOOGLE_SHEET_ID    = os.environ.get("GOOGLE_SHEET_ID", "")
 SGT                = ZoneInfo("Asia/Singapore")
 
-# ── Persistent store ───────────────────────────────────────────────────────────
+# ── Google Sheets setup ────────────────────────────────────────────────────────
+def get_sheet():
+    try:
+        creds_json = os.environ.get("GOOGLE_CREDENTIALS", "")
+        creds_dict = json.loads(creds_json)
+        scopes     = ["https://spreadsheets.google.com/feeds",
+                      "https://www.googleapis.com/auth/drive"]
+        creds      = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client     = gspread.authorize(creds)
+        sheet      = client.open_by_key(GOOGLE_SHEET_ID)
+        return sheet
+    except Exception as e:
+        logger.error(f"Google Sheets connection error: {e}")
+        return None
+
+def ensure_sheet_headers(worksheet):
+    """Set up headers if the sheet is empty."""
+    headers = worksheet.row_values(1)
+    if not headers:
+        worksheet.append_row([
+            "Date", "Reporter", "Store", "Retailer",
+            "Sentiment", "Priority", "Units Sold",
+            "Summary", "Sales Insights", "Competitor Activity",
+            "Customer Feedback", "Stock & Display", "Staff Feedback",
+            "Promo Effectiveness", "Actions Required",
+            "Competitor Benchmarking", "Share Trend", "Share Index",
+            "Share Index Notes", "Raw Notes"
+        ], value_input_option="RAW")
+        # Format header row
+        worksheet.format("A1:T1", {
+            "backgroundColor": {"red": 0.1, "green": 0.1, "blue": 0.18},
+            "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+            "horizontalAlignment": "CENTER"
+        })
+
+def write_to_sheet(data: dict, reporter: str, store: str, retailer: str,
+                   date_str: str, notes: str):
+    """Write a single store visit report as a new row in Google Sheets."""
+    try:
+        sheet_obj = get_sheet()
+        if not sheet_obj:
+            return
+
+        # Try to get or create the "Store Visits" worksheet
+        try:
+            ws = sheet_obj.worksheet("Store Visits")
+        except gspread.WorksheetNotFound:
+            ws = sheet_obj.add_worksheet(title="Store Visits", rows=1000, cols=20)
+
+        ensure_sheet_headers(ws)
+
+        # Flatten insights into readable strings
+        def join_list(key):
+            items = data.get(key, [])
+            return " | ".join(items) if items else ""
+
+        def format_actions(actions):
+            if not actions: return ""
+            return " | ".join(f"[{a.get('urgency','?')}] {a.get('action','')}" for a in actions)
+
+        def format_bench(bench):
+            if not bench: return ""
+            parts = []
+            for c in bench:
+                parts.append(f"{c.get('brand','?')}: shelf={c.get('shelf_space','?')} price={c.get('price_position','?')} promo={c.get('promo_activity','None')} threat={c.get('threat_level','?')}")
+            return " | ".join(parts)
+
+        msp = data.get("market_share_proxy", {})
+
+        row = [
+            date_str,
+            reporter,
+            store,
+            retailer,
+            data.get("sentiment", ""),
+            data.get("priority", ""),
+            data.get("units_sold", "") or "",
+            data.get("summary", ""),
+            join_list("sales"),
+            join_list("competitor"),
+            join_list("customer"),
+            join_list("stock"),
+            join_list("staff"),
+            join_list("promo"),
+            format_actions(data.get("actions", [])),
+            format_bench(data.get("competitor_bench", [])),
+            msp.get("share_trend", "") if msp else "",
+            str(msp.get("overall_share_index", "")) if msp else "",
+            msp.get("notes", "") if msp else "",
+            notes[:500]  # Truncate raw notes to 500 chars
+        ]
+
+        ws.append_row(row, value_input_option="RAW")
+
+        # Colour-code the sentiment cell (column E = col 5)
+        last_row = len(ws.get_all_values())
+        sentiment = data.get("sentiment", "")
+        if sentiment == "Positive":
+            color = {"red": 0.85, "green": 0.95, "blue": 0.85}
+        elif sentiment == "Negative":
+            color = {"red": 0.98, "green": 0.85, "blue": 0.85}
+        else:
+            color = {"red": 1.0, "green": 0.97, "blue": 0.85}
+
+        ws.format(f"E{last_row}", {"backgroundColor": color})
+        logger.info(f"Written to Google Sheets: {store} by {reporter}")
+
+    except Exception as e:
+        logger.error(f"Failed to write to Google Sheets: {e}")
+
+
+# ── Persistent local store ─────────────────────────────────────────────────────
 STORE_FILE = "/tmp/insights_store.json"
 
 def load_store():
@@ -427,9 +541,11 @@ async def handle_cm_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "data": data, "notes": notes
         })
         save_store()
+        write_to_sheet(data, reporter, store, retailer, date_str, notes)
         await ack.edit_text(
             f"✅ Update logged — <b>{esc(store)}</b> ({esc(retailer)}) by {esc(reporter)}\n"
-            f"<i>Daily digest at 9pm SGT</i>", parse_mode=ParseMode.HTML)
+            f"<i>Saved to Google Sheets • Daily digest at 9pm SGT</i>",
+            parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.error(f"Error: {e}")
         await ack.edit_text("⚠️ Could not log this update. Please try again.")
@@ -456,6 +572,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "data": data, "notes": notes
         })
         save_store()
+        write_to_sheet(data, reporter, store, retailer, date_str, notes)
         sent_icon = SENTIMENT_ICONS.get(data.get("sentiment","Mixed"),"🟡")
         pri_icon  = PRIORITY_ICONS.get(data.get("priority","Medium"),"🟡")
         lines = [
@@ -541,11 +658,12 @@ async def test_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     topic_status = f"Monitoring topic ID: <code>{SG_TOPIC_ID}</code>" if SG_TOPIC_ID else "⚠️ SG_TOPIC_ID not set"
-    report_count = len(insights_store)
+    sheet_status = "✅ Connected" if GOOGLE_SHEET_ID else "⚠️ Not configured"
     await update.message.reply_text(
         "👋 <b>Field Insights Bot is active!</b>\n\n"
         f"📌 {topic_status}\n"
-        f"💾 <b>Reports in memory:</b> {report_count}\n"
+        f"📊 <b>Google Sheets:</b> {sheet_status}\n"
+        f"💾 <b>Reports in memory:</b> {len(insights_store)}\n"
         "⏰ <b>Daily digest:</b> 9pm SGT\n"
         "📅 <b>Weekly rollup:</b> Saturday 10am SGT\n\n"
         "<b>Commands:</b>\n"
@@ -562,11 +680,11 @@ def main():
     logger.info(f"API key prefix: {ANTHROPIC_KEY[:20]}")
     logger.info(f"Management chat ID: {MANAGEMENT_CHAT_ID}")
     logger.info(f"SG Topic ID: {SG_TOPIC_ID}")
+    logger.info(f"Google Sheet ID: {GOOGLE_SHEET_ID[:20] if GOOGLE_SHEET_ID else 'NOT SET'}")
     logger.info(f"Reports loaded from disk: {len(insights_store)}")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # 9pm SGT = 13:00 UTC | Saturday 10am SGT = Saturday 02:00 UTC
     app.job_queue.run_daily(
         send_daily_digest,
         time=datetime.strptime("13:00", "%H:%M").time().replace(tzinfo=ZoneInfo("UTC")),
