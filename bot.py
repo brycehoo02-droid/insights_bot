@@ -1,4 +1,5 @@
 import os, json, logging, re
+from collections import defaultdict
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
@@ -31,7 +32,6 @@ def get_sheet():
         logger.error(f"Google Sheets connection error: {e}")
         return None
 
-
 def ensure_sheet_headers(worksheet):
     headers = worksheet.row_values(1)
     if not headers:
@@ -42,27 +42,20 @@ def ensure_sheet_headers(worksheet):
             "💬 Customers", "📦 Stock & Display",
             "🙋 Staff", "⚡ Actions"
         ], value_input_option="RAW")
-
         worksheet.format("A1:N1", {
             "backgroundColor": {"red": 0.1, "green": 0.1, "blue": 0.18},
-            "textFormat": {
-                "bold": True, "fontSize": 11,
-                "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
-            },
-            "horizontalAlignment": "CENTER",
-            "verticalAlignment": "MIDDLE"
+            "textFormat": {"bold": True, "fontSize": 11,
+                           "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+            "horizontalAlignment": "CENTER", "verticalAlignment": "MIDDLE"
         })
-
         col_widths = [160, 130, 160, 130, 100, 90, 90, 280, 250, 250, 250, 220, 200, 260]
-        requests = [
+        worksheet.spreadsheet.batch_update({"requests": [
             {"updateDimensionProperties": {
                 "range": {"sheetId": worksheet.id, "dimension": "COLUMNS",
                           "startIndex": i, "endIndex": i+1},
                 "properties": {"pixelSize": w}, "fields": "pixelSize"
             }} for i, w in enumerate(col_widths)
-        ]
-        worksheet.spreadsheet.batch_update({"requests": requests})
-
+        ]})
         worksheet.spreadsheet.batch_update({"requests": [{
             "updateSheetProperties": {
                 "properties": {"sheetId": worksheet.id,
@@ -71,18 +64,15 @@ def ensure_sheet_headers(worksheet):
             }
         }]})
 
-
 def write_to_sheet(data: dict, reporter: str, store: str, retailer: str,
                    date_str: str, notes: str):
     try:
         sheet_obj = get_sheet()
-        if not sheet_obj:
-            return
+        if not sheet_obj: return
         try:
             ws = sheet_obj.worksheet("Store Visits")
         except gspread.WorksheetNotFound:
             ws = sheet_obj.add_worksheet(title="Store Visits", rows=2000, cols=14)
-
         ensure_sheet_headers(ws)
 
         def join_list(key):
@@ -92,10 +82,7 @@ def write_to_sheet(data: dict, reporter: str, store: str, retailer: str,
         def format_actions(actions):
             if not actions: return ""
             icons = {"Urgent": "🔴 ", "Soon": "🟡 ", "Monitor": "🟢 "}
-            return "\n".join(
-                f"{icons.get(a.get('urgency','Soon'),'• ')}{a.get('action','')}"
-                for a in actions
-            )
+            return "\n".join(f"{icons.get(a.get('urgency','Soon'),'• ')}{a.get('action','')}" for a in actions)
 
         def format_competitors(bench):
             if not bench: return ""
@@ -103,12 +90,9 @@ def write_to_sheet(data: dict, reporter: str, store: str, retailer: str,
             lines = []
             for c in bench:
                 icon = threat_icon.get(c.get("threat_level","Low"), "•")
-                lines.append(
-                    f"{icon} {c.get('brand','?')}\n"
-                    f"   Shelf: {c.get('shelf_space','?')} | "
-                    f"Price: {c.get('price_position','?')} | "
-                    f"Promo: {c.get('promo_activity','None')}"
-                )
+                lines.append(f"{icon} {c.get('brand','?')}\n"
+                    f"   Shelf: {c.get('shelf_space','?')} | Price: {c.get('price_position','?')} | "
+                    f"Promo: {c.get('promo_activity','None')}")
             return "\n".join(lines)
 
         comp_text  = join_list("competitor")
@@ -117,30 +101,21 @@ def write_to_sheet(data: dict, reporter: str, store: str, retailer: str,
 
         row = [
             date_str, reporter, store, retailer,
-            data.get("sentiment", ""),
-            data.get("priority", ""),
-            data.get("units_sold", "") or "",
-            data.get("summary", ""),
-            join_list("sales"),
-            competitors,
-            join_list("customer"),
-            join_list("stock"),
-            join_list("staff"),
+            data.get("sentiment", ""), data.get("priority", ""),
+            data.get("units_sold", "") or "", data.get("summary", ""),
+            join_list("sales"), competitors, join_list("customer"),
+            join_list("stock"), join_list("staff"),
             format_actions(data.get("actions", [])),
         ]
-
         ws.append_row(row, value_input_option="RAW")
         last_row = len(ws.get_all_values())
 
         row_bg = {"red": 0.97, "green": 0.97, "blue": 1.0} if last_row % 2 == 0 \
                  else {"red": 1.0, "green": 1.0, "blue": 1.0}
         ws.format(f"A{last_row}:N{last_row}", {
-            "backgroundColor": row_bg,
-            "verticalAlignment": "TOP",
-            "wrapStrategy": "WRAP",
-            "textFormat": {"fontSize": 10}
+            "backgroundColor": row_bg, "verticalAlignment": "TOP",
+            "wrapStrategy": "WRAP", "textFormat": {"fontSize": 10}
         })
-
         sentiment_colors = {
             "Positive": {"red": 0.82, "green": 0.95, "blue": 0.82},
             "Mixed":    {"red": 1.0,  "green": 0.95, "blue": 0.75},
@@ -148,10 +123,8 @@ def write_to_sheet(data: dict, reporter: str, store: str, retailer: str,
         }
         ws.format(f"E{last_row}", {
             "backgroundColor": sentiment_colors.get(data.get("sentiment",""), row_bg),
-            "horizontalAlignment": "CENTER",
-            "textFormat": {"bold": True, "fontSize": 10}
+            "horizontalAlignment": "CENTER", "textFormat": {"bold": True, "fontSize": 10}
         })
-
         priority_colors = {
             "High":   {"red": 0.98, "green": 0.82, "blue": 0.82},
             "Medium": {"red": 1.0,  "green": 0.95, "blue": 0.75},
@@ -159,11 +132,9 @@ def write_to_sheet(data: dict, reporter: str, store: str, retailer: str,
         }
         ws.format(f"F{last_row}", {
             "backgroundColor": priority_colors.get(data.get("priority",""), row_bg),
-            "horizontalAlignment": "CENTER",
-            "textFormat": {"bold": True, "fontSize": 10}
+            "horizontalAlignment": "CENTER", "textFormat": {"bold": True, "fontSize": 10}
         })
         ws.format(f"G{last_row}", {"horizontalAlignment": "CENTER"})
-
         ws.spreadsheet.batch_update({"requests": [{
             "updateDimensionProperties": {
                 "range": {"sheetId": ws.id, "dimension": "ROWS",
@@ -171,7 +142,6 @@ def write_to_sheet(data: dict, reporter: str, store: str, retailer: str,
                 "properties": {"pixelSize": 90}, "fields": "pixelSize"
             }
         }]})
-
         logger.info(f"Written to Google Sheets row {last_row}: {store} by {reporter}")
     except Exception as e:
         logger.error(f"Failed to write to Google Sheets: {e}")
@@ -248,7 +218,130 @@ def extract_store_name(notes: str) -> str:
                 return normalise_store(parts[1].strip())
     return "Unknown Store"
 
-# ── Prompts ────────────────────────────────────────────────────────────────────
+# ── Local aggregation — no API call needed ─────────────────────────────────────
+def aggregate_reports(reports: list) -> dict:
+    retailer_data = defaultdict(lambda: {
+        "stores": set(), "sentiments": [], "units": 0, "units_known": False,
+        "wins": [], "issues": [], "competitor_activity": [], "actions": [],
+        "share_indices": []
+    })
+    all_sentiments = []
+    total_units    = 0
+    units_known    = False
+
+    for r in reports:
+        d        = r.get("data", {})
+        retailer = r.get("retailer", get_retailer_group(r.get("store","?")))
+        rd       = retailer_data[retailer]
+
+        rd["stores"].add(r.get("store","?"))
+        sentiment = d.get("sentiment","Mixed")
+        rd["sentiments"].append(sentiment)
+        all_sentiments.append(sentiment)
+
+        units = d.get("units_sold")
+        if units and str(units) not in ("", "null", "None"):
+            try:
+                u = int(str(units).replace(",",""))
+                rd["units"] += u
+                rd["units_known"] = True
+                total_units += u
+                units_known = True
+            except ValueError:
+                pass
+
+        rd["wins"]               += d.get("sales", [])[:2]
+        rd["issues"]             += d.get("stock", [])[:1] + d.get("staff", [])[:1]
+        rd["competitor_activity"]+= d.get("competitor", [])[:2]
+        rd["actions"]            += d.get("actions", [])[:2]
+
+        msp = d.get("market_share_proxy", {})
+        if msp and msp.get("overall_share_index"):
+            try: rd["share_indices"].append(int(msp["overall_share_index"]))
+            except (ValueError, TypeError): pass
+
+    def majority_sentiment(sentiments):
+        if not sentiments: return "Mixed"
+        counts = {s: sentiments.count(s) for s in ["Positive","Mixed","Negative"]}
+        return max(counts, key=counts.get)
+
+    def avg_share(indices):
+        return round(sum(indices)/len(indices)) if indices else 5
+
+    by_retailer = []
+    for retailer, rd in retailer_data.items():
+        sentiment   = majority_sentiment(rd["sentiments"])
+        share_idx   = avg_share(rd["share_indices"])
+        share_trend = "Gaining" if share_idx >= 7 else "Losing" if share_idx <= 4 else "Holding"
+        urgent      = [a for a in rd["actions"] if a.get("urgency") == "Urgent"]
+        other       = [a for a in rd["actions"] if a.get("urgency") != "Urgent"]
+        by_retailer.append({
+            "retailer":            retailer,
+            "stores_visited":      sorted(rd["stores"]),
+            "units_sold":          str(rd["units"]) if rd["units_known"] else None,
+            "sentiment":           sentiment,
+            "wins":                list(dict.fromkeys(rd["wins"]))[:3],
+            "issues":              list(dict.fromkeys(rd["issues"]))[:3],
+            "competitor_activity": list(dict.fromkeys(rd["competitor_activity"]))[:3],
+            "share_index":         share_idx,
+            "share_trend":         share_trend,
+            "actions":             (urgent + other)[:3],
+        })
+
+    sentiment_order = {"Negative": 0, "Mixed": 1, "Positive": 2}
+    by_retailer.sort(key=lambda x: sentiment_order.get(x["sentiment"], 1))
+
+    overall_sentiment = majority_sentiment(all_sentiments)
+    flat_indices = [i for rd in retailer_data.values() for i in rd["share_indices"]]
+    avg_idx      = avg_share(flat_indices)
+    overall_trend = "Gaining" if avg_idx >= 7 else "Losing" if avg_idx <= 4 else "Holding"
+
+    seen = set()
+    top_urgent = []
+    for r in reports:
+        for a in r.get("data", {}).get("actions", []):
+            if a.get("urgency") == "Urgent":
+                key = a.get("action","")[:50]
+                if key not in seen:
+                    seen.add(key)
+                    top_urgent.append({"action": a["action"], "urgency": "Urgent",
+                                       "retailer": r.get("retailer","")})
+
+    return {
+        "overall_sentiment":   overall_sentiment,
+        "overall_share_trend": overall_trend,
+        "avg_share_index":     str(avg_idx),
+        "total_units_sold":    str(total_units) if units_known else None,
+        "by_retailer":         by_retailer,
+        "top_urgent_actions":  top_urgent[:5],
+        "report_count":        len(reports),
+        "retailer_count":      len(retailer_data),
+        "stores_visited":      sum(len(rd["stores"]) for rd in retailer_data.values()),
+    }
+
+
+async def get_narrative(bullet_summary: str, model: str, period: str = "week") -> str:
+    """Ask Claude for just a short narrative — fast, 30s timeout, 200 tokens max."""
+    prompt = (f"You are a retail field insights analyst. Based on these aggregated {period} stats, "
+              "write a concise 2-3 sentence executive narrative summary. Be specific and actionable. "
+              "Return ONLY the narrative text, no JSON, no bullet points.")
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01",
+                         "content-type": "application/json"},
+                json={"model": model, "max_tokens": 200, "system": prompt,
+                      "messages": [{"role": "user", "content": bullet_summary}]}
+            )
+        if r.status_code == 200:
+            return "".join(b.get("text","") for b in r.json().get("content",[])).strip()
+    except Exception as e:
+        logger.error(f"Narrative error: {e}")
+    return ""
+
+
+# ── System prompt (per-message analysis only) ──────────────────────────────────
 SYSTEM_PROMPT = """You are a retail field insights analyst. Extract structured insights from store visit notes.
 
 Return ONLY a valid JSON object. Start with { and end with }.
@@ -274,70 +367,14 @@ Return ONLY a valid JSON object. Start with { and end with }.
       "staff_engagement": "High/Medium/Low/None",
       "threat_level": "High/Medium/Low"
     }
-  ]
-}
-
-Empty arrays [] are fine. Never truncate."""
-
-DAILY_PROMPT = """You are a retail field insights analyst. Analyse today's store visit reports and produce a daily digest broken down by retailer.
-
-Return ONLY a valid JSON object:
-{
-  "date": "today's date string",
-  "daily_summary": "2-3 sentence overall summary of today",
-  "total_units_sold": "total number as string or null",
-  "overall_sentiment": "Positive/Mixed/Negative",
-  "overall_share_trend": "Gaining/Holding/Losing",
-  "by_retailer": [
-    {
-      "retailer": "retailer name",
-      "stores_visited": ["store 1", "store 2"],
-      "units_sold": "number as string or null",
-      "sentiment": "Positive/Mixed/Negative",
-      "wins": ["win 1"],
-      "issues": ["issue 1"],
-      "competitor_activity": ["observation 1"],
-      "share_index": 5,
-      "share_trend": "Gaining/Holding/Losing",
-      "actions": [{"action": "what to do", "urgency": "Urgent/Soon/Monitor"}]
-    }
   ],
-  "top_urgent_actions": [{"action": "what to do", "retailer": "which retailer", "urgency": "Urgent/Soon/Monitor"}]
+  "market_share_proxy": {
+    "overall_share_index": 5,
+    "share_trend": "Gaining/Holding/Losing"
+  }
 }
 
-IMPORTANT: share_index must always be an integer 1-10. Never null — use 5 as default.
-Group results by parent retailer. Only include retailers in today's reports."""
-
-WEEKLY_PROMPT = """You are a retail field insights analyst. Analyse this week's store visit reports and produce a weekly rollup broken down by retailer.
-
-Return ONLY a valid JSON object:
-{
-  "week_summary": "2-3 sentence overall summary of the week",
-  "total_units_sold": "total number as string or null",
-  "overall_sentiment": "Positive/Mixed/Negative",
-  "overall_share_trend": "Gaining/Holding/Losing",
-  "avg_share_index": "average as number string e.g. 6",
-  "by_retailer": [
-    {
-      "retailer": "retailer name",
-      "stores_visited": ["store 1"],
-      "total_units": "number as string or null",
-      "sentiment": "Positive/Mixed/Negative",
-      "top_wins": ["win 1"],
-      "recurring_issues": ["issue 1"],
-      "competitor_threats": ["threat 1"],
-      "share_index": 5,
-      "share_trend": "Gaining/Holding/Losing",
-      "priority_actions": [{"action": "what to do", "urgency": "Urgent/Soon/Monitor"}]
-    }
-  ],
-  "cross_retailer_themes": ["theme 1", "theme 2"],
-  "top_urgent_actions": [{"action": "what to do", "retailer": "which retailer", "urgency": "Urgent/Soon/Monitor"}]
-}
-
-IMPORTANT: share_index must always be an integer 1-10. Never null — use 5 as default.
-avg_share_index must be a number string like "6", never null.
-Group by parent retailer. Only include retailers in this week's reports."""
+All numeric scores must be integers 1-10. Use 5 as neutral default. Empty arrays [] are fine. Never truncate."""
 
 CM_TEMPLATE = """📝 <b>Store Visit Update</b>
 ━━━━━━━━━━━━━━━━━━━━━━━━
@@ -377,10 +414,8 @@ def esc(text: str) -> str:
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 def format_share_bar(score) -> str:
-    try:
-        score = max(1, min(10, int(score)))
-    except (TypeError, ValueError):
-        score = 5
+    try: score = max(1, min(10, int(score)))
+    except (TypeError, ValueError): score = 5
     filled = round(score / 10 * 8)
     return "█" * filled + "░" * (8 - filled) + f" {score}/10"
 
@@ -403,12 +438,12 @@ def is_store_update(text: str) -> bool:
 
 async def call_claude(prompt: str, user_msg: str, model: str) -> dict:
     logger.info(f"Calling model: {model}")
-    async with httpx.AsyncClient(timeout=90) as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
-            json={"model": model, "max_tokens": 4096, "system": prompt,
+            json={"model": model, "max_tokens": 2048, "system": prompt,
                   "messages": [{"role": "user", "content": user_msg}]}
         )
     logger.info(f"Anthropic status: {r.status_code}")
@@ -417,8 +452,7 @@ async def call_claude(prompt: str, user_msg: str, model: str) -> dict:
     raw   = "".join(b.get("text", "") for b in r.json().get("content", []))
     clean = re.sub(r"```[a-zA-Z]*", "", raw).replace("```", "").strip()
     start, end = clean.find("{"), clean.rfind("}") + 1
-    if start == -1 or end == 0:
-        raise ValueError("No JSON in response")
+    if start == -1 or end == 0: raise ValueError("No JSON in response")
     json_str = clean[start:end]
     json_str = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ', json_str)
     try:
@@ -433,15 +467,15 @@ def format_retailer_block(r: dict, is_weekly: bool = False) -> list:
     trend     = r.get("share_trend", "Holding")
     ti        = TREND_ICONS.get(trend, "➡️")
     share_idx = r.get("share_index") or 5
-    lines     = []
-    stores     = r.get("stores_visited", [])
-    stores_str = ", ".join(esc(s) for s in stores) if stores else "—"
-    units_key  = "total_units" if is_weekly else "units_sold"
-    units      = r.get(units_key)
-    units_str  = f" • {esc(str(units))} units" if units not in (None,"null","","None") else ""
-    lines.append(f"\n🏪 <b>{esc(r.get('retailer','?'))}</b>{units_str}  {si}")
-    lines.append(f"   📍 {stores_str}")
-    lines.append(f"   {ti} {esc(trend)}  |  Index: <code>{format_share_bar(share_idx)}</code>")
+    stores    = r.get("stores_visited", [])
+    units_key = "total_units" if is_weekly else "units_sold"
+    units     = r.get(units_key)
+    units_str = f" • {esc(str(units))} units" if units not in (None,"null","","None") else ""
+    lines = [
+        f"\n🏪 <b>{esc(r.get('retailer','?'))}</b>{units_str}  {si}",
+        f"   📍 {', '.join(esc(s) for s in stores) if stores else '—'}",
+        f"   {ti} {esc(trend)}  |  Index: <code>{format_share_bar(share_idx)}</code>",
+    ]
     wins_key   = "top_wins" if is_weekly else "wins"
     issues_key = "recurring_issues" if is_weekly else "issues"
     comp_key   = "competitor_threats" if is_weekly else "competitor_activity"
@@ -466,40 +500,49 @@ async def send_daily_digest(context) -> None:
             text=f"📋 <b>Daily Digest — {esc(today)}</b>\n\nNo store visit updates received today.",
             parse_mode=ParseMode.HTML)
         return
-    model        = os.environ.get("MODEL_NAME", "claude-haiku-4-5-20251001").strip()
-    reports_text = "\n".join(
-        f"--- {r['store']} (Retailer: {get_retailer_group(r['store'])}) by {r['reporter']} ---\n{r['notes']}"
-        for r in today_reports)
-    try:
-        data = await call_claude(DAILY_PROMPT, reports_text, model)
-        sent_icon  = SENTIMENT_ICONS.get(data.get("overall_sentiment","Mixed"),"🟡")
-        trend_icon = TREND_ICONS.get(data.get("overall_share_trend","Holding"),"➡️")
-        header = [
-            "📋 <b>Daily Field Insights Digest</b>",
-            "━━━━━━━━━━━━━━━━━━━━━━━━",
-            f"📅 <b>Date:</b> {esc(today)}",
-            f"📊 <b>Reports:</b> {len(today_reports)}  |  {sent_icon} {esc(data.get('overall_sentiment','—'))}  |  {trend_icon} {esc(data.get('overall_share_trend','—'))}",
-        ]
-        if data.get("total_units_sold") not in (None,"null","","None"):
-            header.append(f"🛒 <b>Total units sold:</b> {esc(str(data['total_units_sold']))}")
-        header += ["", f"📝 <i>{esc(data.get('daily_summary','—'))}</i>"]
-        await context.bot.send_message(chat_id=MANAGEMENT_CHAT_ID, text="\n".join(header), parse_mode=ParseMode.HTML)
-        for r in data.get("by_retailer", []):
-            lines = ["━━━━━━━━━━━━━━━━━━━━━━━━"] + format_retailer_block(r, is_weekly=False)
-            await context.bot.send_message(chat_id=MANAGEMENT_CHAT_ID, text="\n".join(lines), parse_mode=ParseMode.HTML)
-        urgent = data.get("top_urgent_actions", [])
-        if urgent:
-            lines = ["━━━━━━━━━━━━━━━━━━━━━━━━", "⚡ <b>Priority Actions Today</b>"]
-            for a in urgent:
-                urg      = a.get("urgency","Soon")
-                retailer = f" [{esc(a.get('retailer',''))}]" if a.get("retailer") else ""
-                lines.append(f"{URGENCY_ICONS.get(urg,'🟡')} <i>{esc(urg)}</i>{retailer} — {esc(a.get('action',''))}")
-            await context.bot.send_message(chat_id=MANAGEMENT_CHAT_ID, text="\n".join(lines), parse_mode=ParseMode.HTML)
-        logger.info(f"Daily digest sent — {len(today_reports)} reports")
-    except Exception as e:
-        logger.error(f"Daily digest error: {e}")
-        await context.bot.send_message(chat_id=MANAGEMENT_CHAT_ID,
-            text=f"⚠️ Could not generate daily digest: {str(e)[:200]}", parse_mode=ParseMode.HTML)
+
+    model = os.environ.get("MODEL_NAME", "claude-haiku-4-5-20251001").strip()
+    agg   = aggregate_reports(today_reports)
+
+    bullet = (
+        f"Date: {today} | Reports: {agg['report_count']} | "
+        f"Stores: {agg['stores_visited']} | Units: {agg.get('total_units_sold','unknown')}\n"
+        f"Sentiment: {agg['overall_sentiment']} | Share trend: {agg['overall_share_trend']}\n"
+        + "\n".join(
+            f"{r['retailer']}: {r['sentiment']}, wins: {', '.join(r['wins'][:2]) or 'none'}, "
+            f"issues: {', '.join(r['issues'][:2]) or 'none'}"
+            for r in agg["by_retailer"]
+        )
+    )
+    narrative  = await get_narrative(bullet, model, period="day")
+    sent_icon  = SENTIMENT_ICONS.get(agg["overall_sentiment"],"🟡")
+    trend_icon = TREND_ICONS.get(agg["overall_share_trend"],"➡️")
+
+    header = [
+        "📋 <b>Daily Field Insights Digest</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"📅 <b>Date:</b> {esc(today)}",
+        f"📊 <b>Reports:</b> {agg['report_count']}  |  {sent_icon} {esc(agg['overall_sentiment'])}  |  {trend_icon} {esc(agg['overall_share_trend'])}",
+    ]
+    if agg.get("total_units_sold"):
+        header.append(f"🛒 <b>Total units sold:</b> {esc(agg['total_units_sold'])}")
+    if narrative:
+        header += ["", f"📝 <i>{esc(narrative)}</i>"]
+    await context.bot.send_message(chat_id=MANAGEMENT_CHAT_ID, text="\n".join(header), parse_mode=ParseMode.HTML)
+
+    for r in agg["by_retailer"]:
+        lines = ["━━━━━━━━━━━━━━━━━━━━━━━━"] + format_retailer_block(r, is_weekly=False)
+        await context.bot.send_message(chat_id=MANAGEMENT_CHAT_ID, text="\n".join(lines), parse_mode=ParseMode.HTML)
+
+    urgent = agg.get("top_urgent_actions", [])
+    if urgent:
+        lines = ["━━━━━━━━━━━━━━━━━━━━━━━━", "⚡ <b>Priority Actions Today</b>"]
+        for a in urgent:
+            retailer = f" [{esc(a.get('retailer',''))}]" if a.get("retailer") else ""
+            lines.append(f"🔴 <i>Urgent</i>{retailer} — {esc(a.get('action',''))}")
+        await context.bot.send_message(chat_id=MANAGEMENT_CHAT_ID, text="\n".join(lines), parse_mode=ParseMode.HTML)
+
+    logger.info(f"Daily digest sent — {len(today_reports)} reports, aggregated locally")
 
 
 async def send_weekly_rollup(context) -> None:
@@ -513,47 +556,54 @@ async def send_weekly_rollup(context) -> None:
             text="📊 <b>Weekly Rollup</b>\n\nNo store visit updates received this week.",
             parse_mode=ParseMode.HTML)
         return
-    model        = os.environ.get("MODEL_NAME", "claude-haiku-4-5-20251001").strip()
-    reports_text = "\n".join(
-        f"--- {r['store']} (Retailer: {get_retailer_group(r['store'])}) by {r['reporter']} on {r['date']} ---\n{r['notes']}"
-        for r in week_reports)
-    try:
-        data = await call_claude(WEEKLY_PROMPT, reports_text, model)
-        sent_icon  = SENTIMENT_ICONS.get(data.get("overall_sentiment","Mixed"),"🟡")
-        trend_icon = TREND_ICONS.get(data.get("overall_share_trend","Holding"),"➡️")
-        avg_idx    = data.get("avg_share_index") or "—"
-        header = [
-            "📊 <b>Weekly Field Insights Rollup</b>",
-            "━━━━━━━━━━━━━━━━━━━━━━━━",
-            f"📅 <b>Week ending:</b> {esc(date_str)}",
-            f"📋 <b>Reports analysed:</b> {len(week_reports)}  |  {sent_icon} {esc(data.get('overall_sentiment','—'))}  |  {trend_icon} {esc(data.get('overall_share_trend','—'))}",
-            f"⭐ <b>Avg share index:</b> {esc(str(avg_idx))}/10",
-        ]
-        if data.get("total_units_sold") not in (None,"null","","None"):
-            header.append(f"🛒 <b>Total units sold:</b> {esc(str(data['total_units_sold']))}")
-        header += ["", f"📝 <i>{esc(data.get('week_summary','—'))}</i>"]
-        await context.bot.send_message(chat_id=MANAGEMENT_CHAT_ID, text="\n".join(header), parse_mode=ParseMode.HTML)
-        for r in data.get("by_retailer", []):
-            lines = ["━━━━━━━━━━━━━━━━━━━━━━━━"] + format_retailer_block(r, is_weekly=True)
-            await context.bot.send_message(chat_id=MANAGEMENT_CHAT_ID, text="\n".join(lines), parse_mode=ParseMode.HTML)
-        themes = data.get("cross_retailer_themes", [])
-        if themes:
-            lines = ["━━━━━━━━━━━━━━━━━━━━━━━━", "🔍 <b>Cross-Retailer Themes</b>"]
-            for t in themes: lines.append(f"• {esc(t)}")
-            await context.bot.send_message(chat_id=MANAGEMENT_CHAT_ID, text="\n".join(lines), parse_mode=ParseMode.HTML)
-        urgent = data.get("top_urgent_actions", [])
-        if urgent:
-            lines = ["━━━━━━━━━━━━━━━━━━━━━━━━", "⚡ <b>Priority Actions This Week</b>"]
-            for a in urgent:
-                urg      = a.get("urgency","Soon")
-                retailer = f" [{esc(a.get('retailer',''))}]" if a.get("retailer") else ""
-                lines.append(f"{URGENCY_ICONS.get(urg,'🟡')} <i>{esc(urg)}</i>{retailer} — {esc(a.get('action',''))}")
-            await context.bot.send_message(chat_id=MANAGEMENT_CHAT_ID, text="\n".join(lines), parse_mode=ParseMode.HTML)
-        logger.info(f"Weekly rollup sent — {len(week_reports)} reports")
-    except Exception as e:
-        logger.error(f"Weekly rollup error: {e}")
-        await context.bot.send_message(chat_id=MANAGEMENT_CHAT_ID,
-            text=f"⚠️ Could not generate weekly rollup: {str(e)[:200]}", parse_mode=ParseMode.HTML)
+
+    model = os.environ.get("MODEL_NAME", "claude-haiku-4-5-20251001").strip()
+    agg   = aggregate_reports(week_reports)
+
+    bullet = (
+        f"Week ending: {date_str} | Reports: {agg['report_count']} | "
+        f"Stores: {agg['stores_visited']} | Units: {agg.get('total_units_sold','unknown')}\n"
+        f"Sentiment: {agg['overall_sentiment']} | Share trend: {agg['overall_share_trend']} | Avg index: {agg['avg_share_index']}/10\n"
+        + "\n".join(
+            f"{r['retailer']}: {r['sentiment']}, wins: {', '.join(r['wins'][:2]) or 'none'}, "
+            f"issues: {', '.join(r['issues'][:2]) or 'none'}, "
+            f"competitors: {', '.join(r['competitor_activity'][:2]) or 'none'}"
+            for r in agg["by_retailer"]
+        )
+    )
+    narrative  = await get_narrative(bullet, model, period="week")
+    sent_icon  = SENTIMENT_ICONS.get(agg["overall_sentiment"],"🟡")
+    trend_icon = TREND_ICONS.get(agg["overall_share_trend"],"➡️")
+
+    header = [
+        "📊 <b>Weekly Field Insights Rollup</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"📅 <b>Week ending:</b> {esc(date_str)}",
+        f"📋 <b>Reports analysed:</b> {agg['report_count']}  |  {sent_icon} {esc(agg['overall_sentiment'])}  |  {trend_icon} {esc(agg['overall_share_trend'])}",
+        f"⭐ <b>Avg share index:</b> {esc(agg['avg_share_index'])}/10",
+    ]
+    if agg.get("total_units_sold"):
+        header.append(f"🛒 <b>Total units sold:</b> {esc(agg['total_units_sold'])}")
+    if narrative:
+        header += ["", f"📝 <i>{esc(narrative)}</i>"]
+    await context.bot.send_message(chat_id=MANAGEMENT_CHAT_ID, text="\n".join(header), parse_mode=ParseMode.HTML)
+
+    for r in agg["by_retailer"]:
+        weekly_r = {**r, "top_wins": r["wins"], "recurring_issues": r["issues"],
+                    "competitor_threats": r["competitor_activity"],
+                    "priority_actions": r["actions"], "total_units": r.get("units_sold")}
+        lines = ["━━━━━━━━━━━━━━━━━━━━━━━━"] + format_retailer_block(weekly_r, is_weekly=True)
+        await context.bot.send_message(chat_id=MANAGEMENT_CHAT_ID, text="\n".join(lines), parse_mode=ParseMode.HTML)
+
+    urgent = agg.get("top_urgent_actions", [])
+    if urgent:
+        lines = ["━━━━━━━━━━━━━━━━━━━━━━━━", "⚡ <b>Priority Actions This Week</b>"]
+        for a in urgent:
+            retailer = f" [{esc(a.get('retailer',''))}]" if a.get("retailer") else ""
+            lines.append(f"🔴 <i>Urgent</i>{retailer} — {esc(a.get('action',''))}")
+        await context.bot.send_message(chat_id=MANAGEMENT_CHAT_ID, text="\n".join(lines), parse_mode=ParseMode.HTML)
+
+    logger.info(f"Weekly rollup sent — {len(week_reports)} reports, aggregated locally")
 
 
 async def handle_cm_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -718,7 +768,6 @@ def main():
     logger.info(f"Reports loaded from disk: {len(insights_store)}")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-
     app.job_queue.run_daily(
         send_daily_digest,
         time=datetime.strptime("13:00", "%H:%M").time().replace(tzinfo=ZoneInfo("UTC")),
@@ -729,7 +778,6 @@ def main():
         time=datetime.strptime("02:00", "%H:%M").time().replace(tzinfo=ZoneInfo("UTC")),
         days=(6,), name="weekly_rollup"
     )
-
     app.add_handler(CommandHandler("start",    start))
     app.add_handler(CommandHandler("testapi",  test_api))
     app.add_handler(CommandHandler("daily",    cmd_daily))
@@ -742,7 +790,6 @@ def main():
     app.add_handler(MessageHandler(
         (filters.TEXT | filters.PHOTO | filters.CAPTION) & ~filters.COMMAND & ~filters.FORWARDED,
         handle_cm_message))
-
     logger.info("Bot running — daily digest 9pm SGT, weekly rollup Saturday 10am SGT")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
